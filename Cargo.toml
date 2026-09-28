@@ -1,0 +1,19 @@
+[package]
+name = "apptop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Per-application resource monitor for Linux: memory, swap, CPU, GPU and disk use per program instead of per process"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/emoryy/apptop"
+readme = "README.md"
+keywords = ["top", "monitor", "cgroups", "tui", "memory"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.104"
+libc = "0.2.189"
+nvml-wrapper = "0.13.0"
+ratatui = "0.30.2"
+serde_json = "1.0.151"
+unicode-width = "0.2.2"
