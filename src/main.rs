@@ -1,5 +1,6 @@
 mod collect;
 mod config;
+mod demo;
 mod docker;
 mod gpu;
 mod history;
@@ -31,6 +32,7 @@ pub struct Sampler {
     clk_tck: u64,
     pub split_terminals: bool,
     pub history: Arc<Mutex<History>>,
+    demo: bool,
 }
 
 impl Default for Sampler {
@@ -51,14 +53,18 @@ impl Sampler {
             clk_tck: collect::clock_ticks(),
             split_terminals: false,
             history: Arc::new(Mutex::new(History::default())),
+            demo: std::env::var_os("APPTOP_DEMO").is_some_and(|v| v == "1"),
         }
     }
 
     pub fn gpu_available(&self) -> bool {
-        self.gpu.available()
+        self.demo || self.gpu.available()
     }
 
     pub fn sample(&mut self) -> Model {
+        if self.demo {
+            return demo::model();
+        }
         let cur = collect::take(&mut self.cache);
         let mut model = model::build(Ctx {
             cur: &cur,

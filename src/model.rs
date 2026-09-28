@@ -69,7 +69,7 @@ pub struct Node {
 }
 
 impl Node {
-    fn new(name: impl Into<String>, detail: impl Into<String>, kind: Kind) -> Self {
+    pub(crate) fn new(name: impl Into<String>, detail: impl Into<String>, kind: Kind) -> Self {
         Node {
             key: String::new(),
             name: name.into(),
@@ -127,7 +127,7 @@ impl Node {
         self.pids.retain(|p| !gone.contains(p));
     }
 
-    fn set_keys(&mut self, parent: &str) {
+    pub(crate) fn set_keys(&mut self, parent: &str) {
         self.key = format!(
             "{parent}/{}\t{}",
             self.name,

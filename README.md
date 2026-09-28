@@ -5,18 +5,9 @@ shows one row per program: a browser with 90 renderer processes, a terminal runn
 sessions, a docker compose stack or a Python app with worker processes each become a single
 row with totals you can compare, and expand into their parts when you want the detail.
 
-```
- CPU ██▌        12%   RAM ███████████▍  61.3G/93.8G pressure  0.0%   Swap ██▏   9.7G/32G in    0/s out    0/s
- ▼Memory  Share          Δ5m    Swap  Pressure   CPU%   GPU%    VRAM  Disk/s   Cache   Proc  Program
-   11.2G  ▊      12%     +40M    2.1G         ·   32.6      ·    780M     29K    649M    101  ▸ Firefox
-    8.9G  ▋     9.5%        ·       0         ·    0.4     97    7.5G       ·    181M      2  ▸ ComfyUI  ~/ComfyUI
-    6.1G  ▍     6.5%     +28M    1.3G         ·   29.8      ·       ·       ·       ·    218  ▾ Claude Code ×26
-    1.2G  ▏     1.3%        ·    355M         ·    8.3      ·       ·       ·       ·     36      ~/src/website ×4
-    558M        0.6%        ·     55M         ·    6.8      ·       ·       ·       ·     11      ~/src/apptop
-    4.6G  ▎     4.9%     -11M       0         ·    2.3      ·       ·       ·     20M     86  ▸ Docker: shop  12 containers
-    2.2G  ▏     2.3%        ·    470M         ·    4.8      ·       ·       ·    2.0G    134  ▸ Konsole
- ?  help   k  stop   i  details   /  filter   t  view: per program   < >  sort   e/E  expand/collapse   q  quit
-```
+![apptop showing programs sorted by memory, with the Claude Code group expanded](docs/screenshot.png)
+
+<sub>Demo data (`APPTOP_DEMO=1`); regenerate with `scripts/screenshot.sh`.</sub>
 
 ## What it shows
 

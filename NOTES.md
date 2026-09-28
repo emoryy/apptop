@@ -92,6 +92,13 @@ Tested on a throwaway `tail -f /dev/null` (SIGTERM, process target) and on a
 `src/i18n.rs`: `tr("English", "magyar")` at each string, `count()` for plurals. The language
 comes from `--lang`, else `LC_ALL` / `LC_MESSAGES` / `LANG` (a `hu` prefix selects Hungarian).
 
+## Screenshot
+
+`docs/screenshot.png` shows the built-in demo data (`APPTOP_DEMO=1`, `src/demo.rs`), never a
+real machine. `scripts/screenshot.sh` runs the demo in a private tmux server, expands the
+Claude Code row and converts `tmux capture-pane -e` output to `docs/screenshot.html` with
+`scripts/ansi2html.py`; the PNG is a 2x browser screenshot of that page's terminal box.
+
 ## Settings
 
 `~/.config/apptop/config` keeps sort column, direction, view mode and the details panel,
