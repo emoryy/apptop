@@ -14,13 +14,92 @@ use crate::model::{Kind, Node, Target};
 pub enum Sig {
     Term,
     Kill,
+    /// index into OTHER
+    Other(usize),
 }
+
+/// Signals offered in the "other" menu: (number, name, English, Hungarian).
+pub const OTHER: [(i32, &str, &str, &str); 8] = [
+    (
+        libc::SIGHUP,
+        "SIGHUP",
+        "hang up; many services reload their config",
+        "bontás; sok szolgáltatás újraolvassa a konfigját",
+    ),
+    (
+        libc::SIGINT,
+        "SIGINT",
+        "interrupt, like Ctrl+C",
+        "megszakítás, mint a Ctrl+C",
+    ),
+    (
+        libc::SIGQUIT,
+        "SIGQUIT",
+        "quit and write a core dump",
+        "kilépés core dumppal",
+    ),
+    (
+        libc::SIGSTOP,
+        "SIGSTOP",
+        "pause; cannot be caught or ignored",
+        "felfüggesztés; nem kapható el, nem hagyható figyelmen kívül",
+    ),
+    (
+        libc::SIGCONT,
+        "SIGCONT",
+        "resume a paused program",
+        "felfüggesztett program folytatása",
+    ),
+    (
+        libc::SIGTSTP,
+        "SIGTSTP",
+        "pause request, like Ctrl+Z",
+        "felfüggesztés kérése, mint a Ctrl+Z",
+    ),
+    (
+        libc::SIGUSR1,
+        "SIGUSR1",
+        "meaning defined by the program",
+        "jelentését a program határozza meg",
+    ),
+    (
+        libc::SIGUSR2,
+        "SIGUSR2",
+        "meaning defined by the program",
+        "jelentését a program határozza meg",
+    ),
+];
 
 impl Sig {
     pub fn name(self) -> &'static str {
         match self {
             Sig::Term => "SIGTERM",
             Sig::Kill => "SIGKILL",
+            Sig::Other(i) => OTHER[i].1,
+        }
+    }
+
+    fn signo(self) -> i32 {
+        match self {
+            Sig::Term => libc::SIGTERM,
+            Sig::Kill => libc::SIGKILL,
+            Sig::Other(i) => OTHER[i].0,
+        }
+    }
+
+    /// Signals that end or interrupt a program also need SIGCONT to reach a stopped one.
+    fn wakes_stopped(self) -> bool {
+        matches!(
+            self.signo(),
+            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT | libc::SIGHUP
+        )
+    }
+
+    pub fn explain(self) -> &'static str {
+        match self {
+            Sig::Term => tr("a request, the program can still save", "kérés, a program még menthet"),
+            Sig::Kill => tr("immediate, nothing is saved", "azonnali, mentés nélkül"),
+            Sig::Other(i) => tr(OTHER[i].2, OTHER[i].3),
         }
     }
 }
@@ -170,10 +249,14 @@ pub fn execute(plan: &Plan, sig: Sig, tx: Sender<(String, bool)>) -> (String, bo
     let mut failed = false;
     if !plan.containers.is_empty() {
         let verb = if sig == Sig::Term { "stop" } else { "kill" };
+        let mut args = vec![verb.to_string()];
+        if let Sig::Other(_) = sig {
+            args.push(format!("--signal={}", sig.name()));
+        }
         let ids: Vec<String> = plan.containers.iter().map(|(id, _)| id.clone()).collect();
         let n = ids.len();
         thread::spawn(move || {
-            let msg = match Command::new("docker").arg(verb).args(&ids).output() {
+            let msg = match Command::new("docker").args(&args).args(&ids).output() {
                 Ok(o) if o.status.success() => (
                     format!(
                         "docker {verb}: {} {}",
@@ -209,7 +292,7 @@ pub fn execute(plan: &Plan, sig: Sig, tx: Sender<(String, bool)>) -> (String, bo
                 }
             }
         }
-        let signo = if sig == Sig::Term { libc::SIGTERM } else { libc::SIGKILL };
+        let signo = sig.signo();
         for &(pid, st) in &plan.pids {
             if handled.contains(&pid) {
                 continue;
@@ -220,6 +303,11 @@ pub fn execute(plan: &Plan, sig: Sig, tx: Sender<(String, bool)>) -> (String, bo
             }
             // SAFETY: plain kill(2) on a pid whose start time was just verified.
             let r = unsafe { libc::kill(pid as i32, signo) };
+            if r == 0 && sig.wakes_stopped() {
+                // a stopped process only acts on the signal once it runs again (systemd does the same)
+                // SAFETY: as above.
+                unsafe { libc::kill(pid as i32, libc::SIGCONT) };
+            }
             if r == 0 {
                 ok += 1;
             } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {

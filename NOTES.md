@@ -81,6 +81,8 @@ container during testing).
 | docker container / compose group | `docker stop` in a background thread | `docker kill` |
 | system cgroup, other user's process | refused (no sudo) | refused |
 
+Other signals (SIGHUP, SIGINT, SIGQUIT, SIGSTOP, SIGCONT, SIGTSTP, SIGUSR1, SIGUSR2) come from a drop-down in the panel; they go to every process with kill(2) (never `cgroup.kill`, which only sends SIGKILL) and to containers as `docker kill --signal`. A signal sent to a stopped process stays pending until SIGCONT, so SIGTERM, SIGINT, SIGQUIT and SIGHUP are followed by SIGCONT, which is what systemd does when it stops a unit. Found while testing: SIGTERM to a process paused with SIGSTOP did nothing until SIGCONT arrived.
+
 Group rows ("Claude Code ×26") are allowed; the panel states how many programs, processes and
 containers stop, and warns when apptop's own ancestry (its terminal) is included.
 

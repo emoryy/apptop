@@ -105,13 +105,13 @@ grouping rules is in [NOTES.md](NOTES.md).
 ## Stopping programs
 
 `k` opens a panel that names the row, its kind, the cgroup or containers affected, and the
-first processes with their command lines. SIGTERM is the default; `Tab` switches to SIGKILL.
+first processes with their command lines. SIGTERM is the default; `Tab` cycles SIGTERM, SIGKILL and the last pick from the other-signals menu (`↓`): SIGHUP, SIGINT, SIGQUIT, SIGSTOP, SIGCONT, SIGTSTP, SIGUSR1, SIGUSR2, each with a one-line explanation. Every chip in the panel is clickable. SIGTERM, SIGINT, SIGQUIT and SIGHUP are followed by SIGCONT, as systemd does, so a paused program acts on them at once.
 
 | Row | SIGTERM | SIGKILL |
 |---|---|---|
 | application or user service | every process in its cgroup | `cgroup.kill` |
 | program started in a terminal, single process | those processes | same |
-| docker container or compose group | `docker stop` | `docker kill` |
+| docker container or compose group | `docker stop` | `docker kill` (other signals: `docker kill --signal`) |
 | system service, another user's process | refused | refused |
 
 Processes are identified by PID and start time, so a PID reused in the meantime is never

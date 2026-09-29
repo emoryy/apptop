@@ -20,7 +20,7 @@ use crate::Sampler;
 use crate::config::Config;
 use crate::history::History;
 use crate::i18n::{count, tr};
-use crate::kill::{self, Plan, Sig};
+use crate::kill::{self, OTHER, Plan, Sig};
 use crate::model::{Kind, Model, Node, Summary, Target};
 
 const AMBER: Color = Color::Rgb(242, 184, 75);
@@ -280,10 +280,24 @@ struct Row {
     node: Node,
 }
 
+#[derive(Clone, Copy)]
+enum KillHit {
+    Sig(Sig),
+    Menu,
+    Pick(usize),
+    Key(KeyCode),
+}
+
 enum Modal {
     None,
     Help,
-    Kill { plan: Plan, sig: Sig },
+    /// `other` remembers the last pick from the menu; `menu` is the open menu's cursor
+    Kill {
+        plan: Plan,
+        sig: Sig,
+        other: usize,
+        menu: Option<usize>,
+    },
 }
 
 /// Facts about the selected row read from /proc, refreshed once per model.
@@ -321,6 +335,10 @@ struct App {
     /// footer hit segments: (from x, to x exclusive, key it stands for); KeyCode::Null toggles expand/collapse
     footer_cells: Vec<(u16, u16, KeyCode)>,
     footer_y: u16,
+    /// the last pick from the kill panel's "other" menu, kept for the session
+    last_other: usize,
+    /// kill panel hit segments: (y, from x, to x, what)
+    kill_cells: Vec<(u16, u16, u16, KillHit)>,
     row_actions: Vec<(u16, u16, KeyCode)>,
     row_actions_y: u16,
     name_x: u16,
@@ -362,6 +380,8 @@ pub fn run(sampler: Sampler, interval: Duration, cfg: Config) -> Result<()> {
         header_cells: Vec::new(),
         footer_cells: Vec::new(),
         footer_y: 0,
+        last_other: 0,
+        kill_cells: Vec::new(),
         row_actions: Vec::new(),
         row_actions_y: u16::MAX,
         name_x: 0,
@@ -551,6 +571,73 @@ impl App {
         (0..i).rev().find(|&j| self.rows[j].depth < d)
     }
 
+    fn kill_key(&mut self, code: KeyCode) {
+        let Modal::Kill { plan, sig, other, menu } = &mut self.modal else {
+            return;
+        };
+        if let Some(cur) = menu {
+            match code {
+                KeyCode::Up => *cur = (*cur + OTHER.len() - 1) % OTHER.len(),
+                KeyCode::Down => *cur = (*cur + 1) % OTHER.len(),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    *other = *cur;
+                    *sig = Sig::Other(*cur);
+                    *menu = None;
+                    self.last_other = *other;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => *menu = None,
+                _ => {}
+            }
+            return;
+        }
+        let cycle = [Sig::Term, Sig::Kill, Sig::Other(*other)];
+        let at = cycle.iter().position(|c| c == sig).unwrap_or(0);
+        match code {
+            KeyCode::Tab | KeyCode::Right => *sig = cycle[(at + 1) % 3],
+            KeyCode::BackTab | KeyCode::Left => *sig = cycle[(at + 2) % 3],
+            KeyCode::Char('9') => *sig = Sig::Kill,
+            KeyCode::Down | KeyCode::Char('o') => *menu = Some(*other),
+            KeyCode::Enter if plan.forbidden.is_none() && !plan.is_empty() => {
+                let (msg, err) = kill::execute(plan, *sig, self.msg_tx.clone());
+                self.status = Some((msg, Instant::now(), err));
+                self.modal = Modal::None;
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => self.modal = Modal::None,
+            _ => {}
+        }
+    }
+
+    fn kill_click(&mut self, col: u16, row: u16) {
+        let Some(&(_, _, _, hit)) = self
+            .kill_cells
+            .iter()
+            .find(|(y, a, b, _)| *y == row && col >= *a && col < *b)
+        else {
+            // a click outside an open menu closes it
+            if let Modal::Kill { menu, .. } = &mut self.modal {
+                *menu = None;
+            }
+            return;
+        };
+        let Modal::Kill { sig, other, menu, .. } = &mut self.modal else {
+            return;
+        };
+        match hit {
+            KillHit::Sig(s) => {
+                *sig = s;
+                *menu = None;
+            }
+            KillHit::Menu => *menu = if menu.is_some() { None } else { Some(*other) },
+            KillHit::Pick(i) => {
+                *other = i;
+                *sig = Sig::Other(i);
+                *menu = None;
+                self.last_other = i;
+            }
+            KillHit::Key(code) => self.kill_key(code),
+        }
+    }
+
     fn open_kill(&mut self) {
         let Some(row) = self.rows.get(self.selected) else {
             return;
@@ -562,7 +649,12 @@ impl App {
             .copied()
             .collect::<Vec<_>>()
             .join(" · ");
-        self.modal = Modal::Kill { plan, sig: Sig::Term };
+        self.modal = Modal::Kill {
+            plan,
+            sig: Sig::Term,
+            other: self.last_other,
+            menu: None,
+        };
     }
 
     fn on_key(&mut self, k: KeyEvent) {
@@ -587,19 +679,8 @@ impl App {
                 self.modal = Modal::None;
                 return;
             }
-            Modal::Kill { plan, sig } => {
-                match k.code {
-                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('9') | KeyCode::Left | KeyCode::Right => {
-                        *sig = if *sig == Sig::Term { Sig::Kill } else { Sig::Term };
-                    }
-                    KeyCode::Enter if plan.forbidden.is_none() && !plan.is_empty() => {
-                        let (msg, err) = kill::execute(plan, *sig, self.msg_tx.clone());
-                        self.status = Some((msg, Instant::now(), err));
-                        self.modal = Modal::None;
-                    }
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => self.modal = Modal::None,
-                    _ => {}
-                }
+            Modal::Kill { .. } => {
+                self.kill_key(k.code);
                 return;
             }
             Modal::None => {}
@@ -675,8 +756,10 @@ impl App {
 
     fn on_mouse(&mut self, m: MouseEvent) {
         if !matches!(self.modal, Modal::None) {
-            if let (Modal::Help, MouseEventKind::Down(_)) = (&self.modal, m.kind) {
-                self.modal = Modal::None;
+            match (&self.modal, m.kind) {
+                (Modal::Help, MouseEventKind::Down(_)) => self.modal = Modal::None,
+                (Modal::Kill { .. }, MouseEventKind::Down(MouseButton::Left)) => self.kill_click(m.column, m.row),
+                _ => {}
             }
             return;
         }
@@ -923,7 +1006,7 @@ impl App {
         self.draw_footer(Rect::new(area.x, footer_y, area.width, 1), buf);
         match &self.modal {
             Modal::Help => draw_help(area, buf),
-            Modal::Kill { plan, sig } => draw_kill(plan, *sig, area, buf),
+            Modal::Kill { plan, sig, menu, .. } => self.kill_cells = draw_kill(plan, *sig, *menu, area, buf),
             Modal::None => {}
         }
     }
@@ -1742,7 +1825,13 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
     }
 }
 
-fn draw_kill(plan: &Plan, sig: Sig, area: Rect, buf: &mut Buffer) {
+fn draw_kill(
+    plan: &Plan,
+    sig: Sig,
+    menu: Option<usize>,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Vec<(u16, u16, u16, KillHit)> {
     let bg = Style::new().bg(HEADER_BG).fg(HEADER_FG);
     let warn = bg.fg(CORAL).add_modifier(Modifier::BOLD);
     let dim = bg.fg(DIM);
@@ -1845,46 +1934,101 @@ fn draw_kill(plan: &Plan, sig: Sig, area: Rect, buf: &mut Buffer) {
     }
     lines.push((String::new(), bg));
 
-    let r = panel(area, 92, lines.len() as u16 + 5, buf);
+    let r = panel(area, 92, lines.len() as u16 + 6, buf);
     for (i, (t, s)) in lines.iter().enumerate() {
         buf.set_stringn(r.x + 2, r.y + 1 + i as u16, t, (r.width - 4) as usize, *s);
     }
-    let y = r.bottom() - 3;
-    if plan.forbidden.is_some() || plan.is_empty() {
-        buf.set_string(r.x + 2, y, tr("Esc: back", "Esc: vissza"), dim);
-        return;
-    }
-    let on = Style::new().fg(Color::Black).bg(AMBER).add_modifier(Modifier::BOLD);
-    let off = bg.fg(DIM);
-    let mut x = r.x + 2;
-    let (nx, _) = buf.set_stringn(x, y, tr("Signal: ", "Jel: "), usize::MAX, bg);
-    x = nx;
-    for s in [Sig::Term, Sig::Kill] {
-        let (nx, _) = buf.set_stringn(
-            x,
-            y,
-            format!(" {} ", s.name()),
-            usize::MAX,
-            if s == sig { on } else { off },
-        );
-        x = nx + 1;
-    }
-    let explain = if sig == Sig::Term {
-        tr("a request, the program can still save", "kérés, a program még menthet")
-    } else {
-        tr("immediate, nothing is saved", "azonnali, mentés nélkül")
+    let mut cells = Vec::new();
+    let key = Style::new().fg(Color::Black).bg(AMBER).add_modifier(Modifier::BOLD);
+    let actions_y = r.bottom() - 2;
+    let chip_row = |y: u16, items: &[(&str, &str, KeyCode)], buf: &mut Buffer, cells: &mut Vec<_>| {
+        let mut x = r.x + 2;
+        for (k, l, code) in items {
+            let start = x;
+            let (nx, _) = buf.set_stringn(x, y, format!(" {k} "), usize::MAX, key);
+            let (nx, _) = buf.set_stringn(nx + 1, y, *l, usize::MAX, bg);
+            cells.push((y, start, nx, KillHit::Key(*code)));
+            x = nx + 3;
+        }
     };
-    buf.set_stringn(x + 1, y, explain, (r.right() - 2).saturating_sub(x + 1) as usize, dim);
-    buf.set_stringn(
-        r.x + 2,
-        y + 1,
-        tr(
-            "Tab: switch signal   Enter: send   Esc: cancel",
-            "Tab: jel váltása   Enter: küldés   Esc: mégse",
-        ),
-        (r.width - 4) as usize,
-        bg,
+    if plan.forbidden.is_some() || plan.is_empty() {
+        chip_row(
+            actions_y,
+            &[("Esc", tr("back", "vissza"), KeyCode::Esc)],
+            buf,
+            &mut cells,
+        );
+        return cells;
+    }
+
+    // signal chips: the chosen one amber, the others as quiet buttons
+    let sig_y = r.bottom() - 4;
+    let on = Style::new().fg(Color::Black).bg(AMBER).add_modifier(Modifier::BOLD);
+    let off = Style::new().fg(HEADER_FG).bg(SEL_BG);
+    let (mut x, _) = buf.set_stringn(r.x + 2, sig_y, tr("Signal: ", "Jel: "), usize::MAX, bg);
+    let other_label = match sig {
+        Sig::Other(i) => format!(" {} ▾ ", OTHER[i].1),
+        _ => format!(" {} ▾ ", tr("other…", "egyéb…")),
+    };
+    let menu_x = {
+        let mut menu_x = x;
+        for (label, hit, active) in [
+            (" SIGTERM ".to_string(), KillHit::Sig(Sig::Term), sig == Sig::Term),
+            (" SIGKILL ".to_string(), KillHit::Sig(Sig::Kill), sig == Sig::Kill),
+            (other_label, KillHit::Menu, matches!(sig, Sig::Other(_))),
+        ] {
+            if matches!(hit, KillHit::Menu) {
+                menu_x = x;
+            }
+            let (nx, _) = buf.set_stringn(x, sig_y, &label, usize::MAX, if active { on } else { off });
+            cells.push((sig_y, x, nx, hit));
+            x = nx + 1;
+        }
+        menu_x
+    };
+    buf.set_stringn(r.x + 2, sig_y + 1, sig.explain(), (r.width - 4) as usize, dim);
+    chip_row(
+        actions_y,
+        &[
+            ("Enter", tr("send", "küldés"), KeyCode::Enter),
+            ("Tab", tr("signal", "jel"), KeyCode::Tab),
+            ("↓", tr("other signals", "egyéb jelek"), KeyCode::Down),
+            ("Esc", tr("cancel", "mégse"), KeyCode::Esc),
+        ],
+        buf,
+        &mut cells,
     );
+
+    if let Some(cur) = menu {
+        // drop-down under the "other" chip; its clicks are checked before the rows beneath it
+        let w: u16 = 74;
+        let x0 = menu_x.min(area.right().saturating_sub(w + 1));
+        let y0 = sig_y + 1;
+        let h = OTHER.len() as u16 + 2;
+        let y0 = if y0 + h > area.bottom() {
+            sig_y.saturating_sub(h)
+        } else {
+            y0
+        };
+        let box_style = Style::new().bg(SEL_BG).fg(HEADER_FG);
+        for yy in y0..y0 + h {
+            buf.set_string(x0, yy, " ".repeat(w as usize), box_style);
+        }
+        let mut menu_cells = Vec::new();
+        for (i, (_, name, en, hu)) in OTHER.iter().enumerate() {
+            let yy = y0 + 1 + i as u16;
+            let style = if i == cur { on } else { box_style };
+            if i == cur {
+                buf.set_string(x0 + 1, yy, " ".repeat(w as usize - 2), style);
+            }
+            buf.set_stringn(x0 + 2, yy, *name, 9, style.add_modifier(Modifier::BOLD));
+            buf.set_stringn(x0 + 12, yy, tr(en, hu), w as usize - 14, style);
+            menu_cells.push((yy, x0, x0 + w, KillHit::Pick(i)));
+        }
+        menu_cells.extend(cells);
+        return menu_cells;
+    }
+    cells
 }
 
 #[cfg(test)]
