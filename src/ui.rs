@@ -751,11 +751,19 @@ impl App {
     }
 
     fn draw(&mut self, area: Rect, buf: &mut Buffer) {
-        if area.height < 6 {
+        if area.height < 7 {
             return;
         }
         let summary_y = area.y;
-        let header_y = area.y + 1;
+        // a lower-eighth-block rule sits on the header band like a border, so the summary
+        // meters do not read as column labels
+        buf.set_string(
+            area.x,
+            area.y + 1,
+            "▁".repeat(area.width as usize),
+            Style::new().fg(TRACK),
+        );
+        let header_y = area.y + 2;
         let footer_y = area.bottom() - 1;
         let info_h: u16 = if self.cfg.info && area.height >= 20 { 8 } else { 0 };
         self.table_top = header_y + 1;
