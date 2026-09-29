@@ -4,7 +4,7 @@
 # docs/screenshot.png.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cols=${COLS:-150} rows=${ROWS:-34}
+cols=${COLS:-150} rows=${ROWS:-35}
 cargo build --release --quiet
 tmux="tmux -L apptop-screenshot -f /dev/null"
 $tmux kill-server 2>/dev/null || true
