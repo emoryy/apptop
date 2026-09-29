@@ -586,6 +586,11 @@ impl App {
                     self.last_other = *other;
                 }
                 KeyCode::Esc | KeyCode::Char('q') => *menu = None,
+                // back towards the chip on the left of the menu's own chip
+                KeyCode::Left => {
+                    *menu = None;
+                    *sig = Sig::Kill;
+                }
                 _ => {}
             }
             return;
@@ -1934,7 +1939,7 @@ fn draw_kill(
     }
     lines.push((String::new(), bg));
 
-    let r = panel(area, 92, lines.len() as u16 + 6, buf);
+    let r = panel(area, 92, lines.len() as u16 + 7, buf);
     for (i, (t, s)) in lines.iter().enumerate() {
         buf.set_stringn(r.x + 2, r.y + 1 + i as u16, t, (r.width - 4) as usize, *s);
     }
@@ -1962,7 +1967,7 @@ fn draw_kill(
     }
 
     // signal chips: the chosen one amber, the others as quiet buttons
-    let sig_y = r.bottom() - 4;
+    let sig_y = r.bottom() - 5;
     let on = Style::new().fg(Color::Black).bg(AMBER).add_modifier(Modifier::BOLD);
     let off = Style::new().fg(HEADER_FG).bg(SEL_BG);
     let (mut x, _) = buf.set_stringn(r.x + 2, sig_y, tr("Signal: ", "Jel: "), usize::MAX, bg);
@@ -2001,7 +2006,7 @@ fn draw_kill(
 
     if let Some(cur) = menu {
         // drop-down under the "other" chip; its clicks are checked before the rows beneath it
-        let w: u16 = 74;
+        let w: u16 = 86;
         let x0 = menu_x.min(area.right().saturating_sub(w + 1));
         let y0 = sig_y + 1;
         let h = OTHER.len() as u16 + 2;

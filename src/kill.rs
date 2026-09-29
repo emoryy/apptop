@@ -23,8 +23,8 @@ pub const OTHER: [(i32, &str, &str, &str); 8] = [
     (
         libc::SIGHUP,
         "SIGHUP",
-        "hang up; many services reload their config",
-        "bontás; sok szolgáltatás újraolvassa a konfigját",
+        "terminal closed (hang up); services usually reload their config",
+        "terminál bezárva (hang up); szolgáltatásoknál: konfig újraolvasása",
     ),
     (
         libc::SIGINT,
