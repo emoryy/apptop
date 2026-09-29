@@ -35,6 +35,13 @@ pub struct CgStat {
     pub kernel: u64,
     pub shmem: u64,
     pub slab_reclaimable: u64,
+    pub slab_unreclaimable: u64,
+    pub pagetables: u64,
+    pub kernel_stack: u64,
+    /// compressed swap held in RAM; charged as kernel memory
+    pub zswap: u64,
+    /// swapped pages read back into RAM that still keep their swap slot
+    pub swapcached: u64,
     pub swap: u64,
     pub usage_usec: u64,
     /// memory.pressure "some avg10": % of time some task waited for memory
@@ -280,6 +287,11 @@ fn walk_cgroups(dir: &Path, rel: &str, out: &mut HashMap<String, CgStat>) {
                 "kernel" => st.kernel = v,
                 "shmem" => st.shmem = v,
                 "slab_reclaimable" => st.slab_reclaimable = v,
+                "slab_unreclaimable" => st.slab_unreclaimable = v,
+                "pagetables" => st.pagetables = v,
+                "kernel_stack" => st.kernel_stack = v,
+                "zswap" => st.zswap = v,
+                "swapcached" => st.swapcached = v,
                 _ => {}
             }
         }

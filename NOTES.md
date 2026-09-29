@@ -25,7 +25,7 @@ cgroups have no `io.stat`; hence the per-process I/O counters. Other users' proc
 services, container users) show no I/O.
 
 The cgroup totals are exact and include kernel memory and exited children, which no process
-row can show, so each breakdown ends with an "other" row holding the difference.
+row can show, so each breakdown ends with an "other" row holding the difference. It expands into the parts `memory.stat` names: zswap (compressed swap in RAM, charged as kernel memory), page tables, unreclaimable slab, kernel stacks, other kernel memory, the swap cache (pages read back into RAM that keep their swap slot, so they count in both Memory and Swap), and an "unattributed" remainder. The remainder is mostly swap charged to the cgroup that no live process's `VmSwap` explains: cgroup v2 keeps charges with the cgroup where memory was allocated, so pages of exited processes and of processes that moved into their own scope stay on it.
 
 Shared memory is counted per process by its PSS share (`Pss_Shmem` from `smaps_rollup`), but
 only for processes with more than 32 MB RssShmem. `smaps_rollup` costs up to ~100 ms for a

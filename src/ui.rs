@@ -1548,7 +1548,10 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
             ("CPU% / GPU%", "100% = egy teljes CPU mag / a teljes GPU"),
             ("Lemez/s", "olvasás + írás a lemezre (csak saját folyamatok)"),
             ("Cache", "fájl cache, szükség esetén felszabadul"),
-            ("egyéb", "amit a cgroup mér, de egyik listázott folyamat sem visz"),
+            (
+                "egyéb",
+                "cgroup-szintű maradék; kibontva: zswap, laptáblák, swap cache…",
+            ),
             ("", ""),
             ("", "Billentyűk"),
             (
@@ -1588,7 +1591,10 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
             ("CPU% / GPU%", "100% = one whole CPU core / the whole GPU"),
             ("Disk/s", "disk reads + writes (own processes only)"),
             ("Cache", "file cache, freed when memory is needed"),
-            ("other", "what the cgroup measures but no listed process accounts for"),
+            (
+                "other",
+                "cgroup-level remainder; expand for zswap, page tables, swap cache…",
+            ),
             ("", ""),
             ("", "Keys"),
             ("↑↓ PgUp PgDn", "move;  → ← Enter: expand, collapse;  e / E: everything"),

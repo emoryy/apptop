@@ -653,7 +653,7 @@ fn unit_items(
     };
     if rows.len() > 1 || rows.iter().any(|r| !r.children.is_empty()) || kind == Kind::Terminal {
         if node.cache.is_some() {
-            push_rest(&node, &mut rows);
+            push_rest(&node, &mut rows, u.stat.as_ref());
         }
         node.children = rows;
     }
@@ -678,7 +678,7 @@ fn unit_items(
 
 /// cgroup totals include kernel memory, shared memory and exited children;
 /// one row holds the part no listed process accounts for.
-fn push_rest(total: &Node, rows: &mut Vec<Node>) {
+fn push_rest(total: &Node, rows: &mut Vec<Node>, stat: Option<&CgStat>) {
     let mem: u64 = rows.iter().map(|r| r.mem).sum();
     let cpu: f64 = rows.iter().map(|r| r.cpu).sum();
     let swap: u64 = rows.iter().map(|r| r.swap).sum();
@@ -693,9 +693,71 @@ fn push_rest(total: &Node, rows: &mut Vec<Node>) {
     rest.mem = total.mem.saturating_sub(mem);
     rest.cpu = (total.cpu - cpu).max(0.0);
     rest.swap = total.swap.saturating_sub(swap);
+    if let Some(st) = stat {
+        rest.children = rest_parts(&rest, st);
+    }
     if rest.mem > 1 << 20 || rest.cpu >= 0.1 || rest.swap > 1 << 20 {
         rows.push(rest);
     }
+}
+
+/// What the "other" row is made of, from the cgroup's memory.stat. The kernel parts are exact;
+/// whatever they do not explain lands in "unattributed".
+fn rest_parts(rest: &Node, st: &CgStat) -> Vec<Node> {
+    let mut parts = Vec::new();
+    let mut part = |name: &'static str, detail: &'static str, mem: u64, swap: u64| {
+        let mut n = Node::new(name, detail, Kind::Rest);
+        n.mem = mem;
+        n.swap = swap;
+        if mem > 1 << 20 || swap > 1 << 20 {
+            parts.push(n);
+        }
+    };
+    let kernel = st.kernel.saturating_sub(st.slab_reclaimable);
+    let known = st.zswap + st.pagetables + st.kernel_stack + st.slab_unreclaimable;
+    part(
+        tr("zswap", "zswap"),
+        tr("compressed swap kept in RAM", "tömörített swap a RAM-ban"),
+        st.zswap,
+        0,
+    );
+    part(tr("page tables", "laptáblák"), "", st.pagetables, 0);
+    part(
+        tr("slab", "slab"),
+        tr(
+            "kernel objects that cannot be reclaimed",
+            "nem visszavehető kernel objektumok",
+        ),
+        st.slab_unreclaimable,
+        0,
+    );
+    part(tr("kernel stacks", "kernel stackek"), "", st.kernel_stack, 0);
+    part(
+        tr("other kernel", "egyéb kernel"),
+        tr("socket buffers, percpu, vmalloc", "socket pufferek, percpu, vmalloc"),
+        kernel.saturating_sub(known),
+        0,
+    );
+    let swapcache = st.swapcached.min(rest.swap);
+    part(
+        tr("swap cache", "swap cache"),
+        tr(
+            "read back into RAM, slot kept; also counted in Memory",
+            "visszaolvasva a RAM-ba, a swap-hely megmaradt; a Memóriában is számít",
+        ),
+        0,
+        swapcache,
+    );
+    part(
+        tr("unattributed", "besorolatlan"),
+        tr(
+            "left by exited or moved processes, unmapped shared memory",
+            "kilépett vagy átköltözött folyamatoktól, nem leképezett megosztott memória",
+        ),
+        rest.mem.saturating_sub(kernel),
+        rest.swap - swapcache,
+    );
+    parts
 }
 
 fn group_node(name: String, mut items: Vec<Item>) -> Node {
