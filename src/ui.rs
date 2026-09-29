@@ -306,6 +306,9 @@ struct App {
     gpu: bool,
     interval: Duration,
     header_cells: Vec<(ViewCol, u16, u16)>,
+    /// footer hit segments: (from x, to x exclusive, key it stands for); KeyCode::Null toggles expand/collapse
+    footer_cells: Vec<(u16, u16, KeyCode)>,
+    footer_y: u16,
     name_x: u16,
     table_top: u16,
     table_height: u16,
@@ -343,6 +346,8 @@ pub fn run(sampler: Sampler, interval: Duration, cfg: Config) -> Result<()> {
         gpu,
         interval,
         header_cells: Vec::new(),
+        footer_cells: Vec::new(),
+        footer_y: 0,
         name_x: 0,
         table_top: 0,
         table_height: 0,
@@ -356,7 +361,9 @@ pub fn run(sampler: Sampler, interval: Duration, cfg: Config) -> Result<()> {
     let res = event_loop(&mut terminal, &mut app, &model_rx, &msg_rx);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
-    app.cfg.save();
+    if std::env::var_os("APPTOP_DEMO").is_none() {
+        app.cfg.save();
+    }
     res
 }
 
@@ -673,6 +680,22 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if m.row == self.footer_y {
+                    // the first matching segment wins, and single-key segments come first for multi-key chips
+                    let hit = self
+                        .footer_cells
+                        .iter()
+                        .find(|(a, b, _)| m.column >= *a && m.column < *b)
+                        .map(|c| c.2);
+                    let code = match hit {
+                        Some(KeyCode::Null) if self.expanded.is_empty() => KeyCode::Char('e'),
+                        Some(KeyCode::Null) => KeyCode::Char('E'),
+                        Some(c) => c,
+                        None => return,
+                    };
+                    self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    return;
+                }
                 if m.row == self.table_top.saturating_sub(1) {
                     let hit = self
                         .header_cells
@@ -875,7 +898,9 @@ impl App {
         }
     }
 
-    fn draw_footer(&self, area: Rect, buf: &mut Buffer) {
+    fn draw_footer(&mut self, area: Rect, buf: &mut Buffer) {
+        self.footer_cells.clear();
+        self.footer_y = area.y;
         let key = Style::new().fg(Color::Black).bg(AMBER).add_modifier(Modifier::BOLD);
         let mut x = area.x;
         if self.filter_mode {
@@ -934,8 +959,26 @@ impl App {
             if x + (k.width() + l.width() + 4) as u16 > area.right() {
                 break;
             }
-            let (nx, _) = buf.set_stringn(x, area.y, format!(" {k} "), usize::MAX, key);
-            let (nx, _) = buf.set_stringn(nx + 1, area.y, &l, usize::MAX, Style::new());
+            let (chip_end, _) = buf.set_stringn(x, area.y, format!(" {k} "), usize::MAX, key);
+            let (nx, _) = buf.set_stringn(chip_end + 1, area.y, &l, usize::MAX, Style::new());
+            // multi-key chips ("< >", "e/E") map each key character to itself
+            let keys: Vec<(u16, char)> = k
+                .chars()
+                .enumerate()
+                .filter(|(_, c)| *c != ' ' && *c != '/' || k == "/")
+                .map(|(i, c)| (x + 1 + i as u16, c))
+                .collect();
+            let default = match k {
+                "< >" => KeyCode::Char('>'),
+                "e/E" => KeyCode::Null,
+                _ => KeyCode::Char(k.chars().next().unwrap_or(' ')),
+            };
+            if keys.len() > 1 {
+                for &(cx, c) in &keys {
+                    self.footer_cells.push((cx, cx + 1, KeyCode::Char(c)));
+                }
+            }
+            self.footer_cells.push((x, nx, default));
             x = nx + 2;
         }
     }
