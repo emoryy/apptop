@@ -32,6 +32,18 @@ const SEL_BG: Color = Color::Rgb(59, 74, 107);
 const GOOD: Color = Color::Rgb(127, 211, 160);
 const TRACK: Color = Color::Rgb(70, 78, 92);
 const GAP: u16 = 2;
+/// Optional columns, least important first.
+const DROP_ORDER: [ViewCol; 9] = [
+    ViewCol::Procs,
+    ViewCol::Cache,
+    ViewCol::Psi,
+    ViewCol::Io,
+    ViewCol::Gpu,
+    ViewCol::Share,
+    ViewCol::Delta,
+    ViewCol::Vram,
+    ViewCol::Swap,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Col {
@@ -743,6 +755,11 @@ impl App {
         }
     }
 
+    /// Every optional column is already gone: the width left belongs to the name alone.
+    fn minimum_layout(cols: &[ViewCol]) -> bool {
+        !cols.iter().any(|c| DROP_ORDER.contains(c))
+    }
+
     fn columns(&self, width: u16) -> Vec<ViewCol> {
         let mut cols = vec![
             ViewCol::Mem,
@@ -762,17 +779,7 @@ impl App {
             cols.retain(|c| *c != ViewCol::Gpu && *c != ViewCol::Vram);
         }
         // drop the least important columns until the name keeps 30 cells
-        for drop in [
-            ViewCol::Procs,
-            ViewCol::Cache,
-            ViewCol::Psi,
-            ViewCol::Io,
-            ViewCol::Gpu,
-            ViewCol::Share,
-            ViewCol::Delta,
-            ViewCol::Vram,
-            ViewCol::Swap,
-        ] {
+        for drop in DROP_ORDER {
             let fixed: u16 = cols
                 .iter()
                 .filter(|c| **c != ViewCol::Name)
@@ -818,6 +825,7 @@ impl App {
 
         // header: data columns first, the name last, so every number sits next to its name
         let cols = self.columns(area.width);
+        let show_actions = !Self::minimum_layout(&cols);
         buf.set_style(
             Rect::new(area.x, header_y, area.width, 1),
             Style::new().bg(HEADER_BG).fg(HEADER_FG),
@@ -876,7 +884,7 @@ impl App {
                 match c {
                     ViewCol::Name => {
                         let w = area.right().saturating_sub(x + 1);
-                        if selected {
+                        if selected && show_actions {
                             // the name gives up room for at least the bare k / i chips
                             let reserve = if row.node.targets.is_empty() { 4 } else { 8 };
                             let end = draw_name(row, x, y, w.saturating_sub(reserve), base, buf);
