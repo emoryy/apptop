@@ -309,6 +309,8 @@ struct App {
     /// footer hit segments: (from x, to x exclusive, key it stands for); KeyCode::Null toggles expand/collapse
     footer_cells: Vec<(u16, u16, KeyCode)>,
     footer_y: u16,
+    row_actions: Vec<(u16, u16, KeyCode)>,
+    row_actions_y: u16,
     name_x: u16,
     table_top: u16,
     table_height: u16,
@@ -348,6 +350,8 @@ pub fn run(sampler: Sampler, interval: Duration, cfg: Config) -> Result<()> {
         header_cells: Vec::new(),
         footer_cells: Vec::new(),
         footer_y: 0,
+        row_actions: Vec::new(),
+        row_actions_y: u16::MAX,
         name_x: 0,
         table_top: 0,
         table_height: 0,
@@ -680,6 +684,15 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if m.row == self.row_actions_y
+                    && let Some(&(_, _, code)) = self
+                        .row_actions
+                        .iter()
+                        .find(|(a, b, _)| m.column >= *a && m.column < *b)
+                {
+                    self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+                    return;
+                }
                 if m.row == self.footer_y {
                     // the first matching segment wins, and single-key segments come first for multi-key chips
                     let hit = self
@@ -841,6 +854,7 @@ impl App {
         }
 
         let totals = self.model.as_ref().map(share_totals);
+        let mut row_actions = (Vec::new(), u16::MAX);
         for (line, i) in (self.offset..self.rows.len())
             .take(self.table_height as usize)
             .enumerate()
@@ -862,7 +876,14 @@ impl App {
                 match c {
                     ViewCol::Name => {
                         let w = area.right().saturating_sub(x + 1);
-                        draw_name(row, x, y, w, base, buf);
+                        if selected {
+                            // the name gives up room for at least the bare k / i chips
+                            let reserve = if row.node.targets.is_empty() { 4 } else { 8 };
+                            let end = draw_name(row, x, y, w.saturating_sub(reserve), base, buf);
+                            row_actions = (draw_row_actions(row, end, x + w, y, buf), y);
+                        } else {
+                            draw_name(row, x, y, w, base, buf);
+                        }
                     }
                     ViewCol::Share => {
                         if let Some(t) = &totals {
@@ -878,6 +899,7 @@ impl App {
                 x += c.width() + GAP;
             }
         }
+        (self.row_actions, self.row_actions_y) = row_actions;
         if self.rows.is_empty() && self.model.is_some() {
             let msg = if self.filter.is_empty() {
                 tr("no data", "nincs adat")
@@ -1412,10 +1434,11 @@ fn cell(n: &Node, c: ViewCol, base: Style) -> (String, Style) {
     }
 }
 
-fn draw_name(row: &Row, x: u16, y: u16, w: u16, base: Style, buf: &mut Buffer) {
+/// Returns the x just past the last cell written.
+fn draw_name(row: &Row, x: u16, y: u16, w: u16, base: Style, buf: &mut Buffer) -> u16 {
     let indent = 2 * row.depth as u16;
     if indent + 2 >= w {
-        return;
+        return x;
     }
     let marker = match (row.expandable, row.expanded) {
         (true, true) => "▾",
@@ -1432,16 +1455,39 @@ fn draw_name(row: &Row, x: u16, y: u16, w: u16, base: Style, buf: &mut Buffer) {
     let avail = (w - indent - 2) as usize;
     let name = display_name(n);
     let used = put_clipped(buf, x + indent + 2, y, &name, avail, name_style);
+    let mut end = x + indent + 2 + used as u16;
     if !n.detail.is_empty() && used + 3 < avail {
-        put_clipped(
-            buf,
-            x + indent + 2 + used as u16 + 2,
-            y,
-            &n.detail,
-            avail - used - 2,
-            base.fg(DIM),
-        );
+        let d = put_clipped(buf, end + 2, y, &n.detail, avail - used - 2, base.fg(DIM));
+        end += 2 + d as u16;
     }
+    end
+}
+
+/// Action chips at the right end of the selected row; returns their hit segments.
+fn draw_row_actions(row: &Row, name_end: u16, right: u16, y: u16, buf: &mut Buffer) -> Vec<(u16, u16, KeyCode)> {
+    let key = Style::new().fg(Color::Black).bg(AMBER).add_modifier(Modifier::BOLD);
+    let label = Style::new().bg(SEL_BG).fg(Color::White);
+    let mut actions = vec![('i', tr("details", "részletek"))];
+    if !row.node.targets.is_empty() {
+        actions.insert(0, ('k', tr("stop", "leállítás")));
+    }
+    let chips_w: u16 = actions.len() as u16 * 4;
+    let full_w: u16 = actions.iter().map(|(_, l)| 4 + l.width() as u16 + 1).sum();
+    let with_labels = name_end + 2 + full_w <= right;
+    let mut x = right.saturating_sub(if with_labels { full_w } else { chips_w });
+    let mut cells = Vec::new();
+    for (k, l) in actions {
+        let start = x;
+        let (nx, _) = buf.set_stringn(x, y, format!(" {k} "), usize::MAX, key);
+        x = nx;
+        if with_labels {
+            let (nx, _) = buf.set_stringn(x, y, format!(" {l}"), usize::MAX, label);
+            x = nx;
+        }
+        cells.push((start, x, KeyCode::Char(k)));
+        x += 1;
+    }
+    cells
 }
 
 /// Writes text, ending in "…" if it does not fit; returns the cells used.
@@ -1620,7 +1666,10 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
             ("t", "terminálban indított programok: saját sor / a terminál alatt"),
             ("q", "kilépés (a rendezés és a nézet megmarad)"),
             ("", ""),
-            ("egér", "fejlécre kattintás rendez, sorra dupla kattintás kibont"),
+            (
+                "egér",
+                "fejléc: rendez; sor: dupla kattintás kibont; a k / i gombok és a lábsor is kattintható",
+            ),
         ]
     } else {
         &[
@@ -1660,7 +1709,10 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
             ("t", "programs started in terminals: own rows / under the terminal"),
             ("q", "quit (sort and view are remembered)"),
             ("", ""),
-            ("mouse", "click a header to sort, double-click a row to expand"),
+            (
+                "mouse",
+                "header: sort; row: double-click expands; the k / i chips and the footer are clickable",
+            ),
         ]
     };
     let r = panel(area, 92, lines.len() as u16 + 2, buf);

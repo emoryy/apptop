@@ -81,7 +81,7 @@ apptop [-d SECONDS] [--split] [--lang en|hu] [--dump [--depth N]]
 | `?` / `F1` | help |
 | `q` / `F10` | quit |
 
-The mouse works too: click a column header to sort, double-click a row to expand it.
+The mouse works too: click a column header to sort, double-click a row to expand it. The selected row carries `k` (stop) and `i` (details) buttons at its right end, labelled when there is room, and every footer hint is clickable.
 
 Sort column, direction, view mode and the details panel are remembered in
 `~/.config/apptop/config`.
