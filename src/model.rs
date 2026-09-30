@@ -900,7 +900,14 @@ fn group_node(name: String, mut items: Vec<Item>) -> Node {
                 .into_iter()
                 .map(|i| {
                     let mut n = i.node;
-                    n.name = if i.instance.is_empty() { n.name } else { i.instance };
+                    n.name = if !i.instance.is_empty() {
+                        i.instance
+                    } else if let Some((pid, _)) = n.pids.first() {
+                        // programs lifted out of a session carry no other tell
+                        format!("PID {pid}")
+                    } else {
+                        n.name
+                    };
                     n.detail.clear();
                     n
                 })
