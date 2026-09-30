@@ -234,7 +234,11 @@ pub fn dump(model: &Model, depth: usize) {
         fmt_bytes(s.swap_out as u64)
     );
     if let Some(g) = &s.gpu {
-        print!("  GPU {}%  VRAM {}/{}", g.util, fmt_bytes(g.used), fmt_bytes(g.total));
+        if g.total == 0 {
+            print!("  GPU {}%  mem {}", g.util, fmt_bytes(g.gtt_used));
+        } else {
+            print!("  GPU {}%  VRAM {}/{}", g.util, fmt_bytes(g.used), fmt_bytes(g.total));
+        }
     }
     println!();
     println!(
@@ -1677,21 +1681,30 @@ fn draw_summary(s: &Summary, interval: Duration, area: Rect, buf: &mut Buffer) {
         ));
     }
     if let Some(g) = &s.gpu {
-        meters.push((
-            "VRAM",
-            g.used as f64 / g.total.max(1) as f64,
-            if g.gtt_used > 0 {
-                format!(
-                    "{:>5}/{} GTT {:>5} GPU {:>3}%",
-                    fmt_bytes(g.used),
-                    fmt_bytes(g.total),
-                    fmt_bytes(g.gtt_used),
-                    g.util
-                )
-            } else {
-                format!("{:>5}/{} GPU {:>3}%", fmt_bytes(g.used), fmt_bytes(g.total), g.util)
-            },
-        ));
+        if g.total == 0 {
+            // integrated GPUs without a VRAM size (i915): show the load and what programs have mapped
+            meters.push((
+                "GPU",
+                g.util as f64 / 100.0,
+                format!("{:>3}% {} {:>5}", g.util, tr("mem", "mem"), fmt_bytes(g.gtt_used)),
+            ));
+        } else {
+            meters.push((
+                "VRAM",
+                g.used as f64 / g.total.max(1) as f64,
+                if g.gtt_used > 0 {
+                    format!(
+                        "{:>5}/{} GTT {:>5} GPU {:>3}%",
+                        fmt_bytes(g.used),
+                        fmt_bytes(g.total),
+                        fmt_bytes(g.gtt_used),
+                        g.util
+                    )
+                } else {
+                    format!("{:>5}/{} GPU {:>3}%", fmt_bytes(g.used), fmt_bytes(g.total), g.util)
+                },
+            ));
+        }
     }
     let tail = format!("{:.0} {}", interval.as_secs_f64(), tr("s", "mp"));
     let text_w: usize = meters.iter().map(|(l, _, t)| l.width() + t.width() + 5).sum();

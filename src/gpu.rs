@@ -158,6 +158,7 @@ impl Drm {
         }
         self.sample_no += 1;
         let read_u64 = |p: PathBuf| fs::read_to_string(p).ok().and_then(|v| v.trim().parse::<u64>().ok());
+        let mut have_busy = false;
         for c in &self.cards {
             s.used += read_u64(c.dir.join("mem_info_vram_used")).unwrap_or(0);
             s.total += read_u64(c.dir.join("mem_info_vram_total")).unwrap_or(0);
@@ -165,6 +166,7 @@ impl Drm {
             s.gtt_total += read_u64(c.dir.join("mem_info_gtt_total")).unwrap_or(0);
             if let Some(b) = read_u64(c.dir.join("gpu_busy_percent")) {
                 s.util = s.util.max(b as u32);
+                have_busy = true;
             }
         }
 
@@ -223,6 +225,13 @@ impl Drm {
             }
         }
         self.prev_busy = busy_now;
+        if !have_busy {
+            // i915/xe have no device-wide busy file: the busiest visible client stands in for it
+            s.util = s.util.max(s.util_per_pid.values().copied().max().unwrap_or(0).min(100));
+        }
+        if s.total == 0 {
+            s.gtt_used = s.gtt_used.max(s.gtt_per_pid.values().sum());
+        }
     }
 }
 
@@ -269,13 +278,27 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
     if driver.starts_with("nvidia") {
         return None;
     }
-    // newer drivers report drm-resident-<region>, older ones drm-memory-<region>
-    let region = |r: &str| {
-        kv.get(format!("drm-resident-{r}").as_str())
-            .or_else(|| kv.get(format!("drm-memory-{r}").as_str()))
-            .map(|v| parse_size(v))
-            .unwrap_or(0)
+    // newer drivers report drm-resident-<region>, older ones drm-memory-<region>; region names
+    // differ per driver: amdgpu vram/gtt, i915/xe local0 (device memory) and system0/stolen-*
+    let (mut vram, mut gtt) = (0, 0);
+    let resident: Vec<(&str, &str)> = kv
+        .iter()
+        .filter_map(|(k, v)| k.strip_prefix("drm-resident-").map(|r| (r, *v)))
+        .collect();
+    let regions: Vec<(&str, &str)> = if resident.is_empty() {
+        kv.iter()
+            .filter_map(|(k, v)| k.strip_prefix("drm-memory-").map(|r| (r, *v)))
+            .collect()
+    } else {
+        resident
     };
+    for (r, v) in regions {
+        if r == "vram" || r.starts_with("local") || r.starts_with("vram") {
+            vram += parse_size(v);
+        } else if r == "gtt" || r.starts_with("system") || r.starts_with("stolen") {
+            gtt += parse_size(v);
+        }
+    }
     let mut engines = Vec::new();
     for (k, v) in &kv {
         if let Some(name) = k.strip_prefix("drm-engine-")
@@ -292,8 +315,8 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
     Some(Client {
         pdev: kv.get("drm-pdev").unwrap_or(&"").to_string(),
         id: kv.get("drm-client-id").and_then(|v| v.parse().ok()).unwrap_or(0),
-        vram: region("vram"),
-        gtt: region("gtt"),
+        vram,
+        gtt,
         engines,
     })
 }
