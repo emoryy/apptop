@@ -15,6 +15,8 @@ pub enum Kind {
     UserService,
     SystemService,
     Kernel,
+    /// a graphical login session whose programs are not in cgroups of their own (XFCE, i3, ...)
+    Session,
     /// something started from a terminal
     Job,
     Group,
@@ -610,10 +612,10 @@ fn unit_items(
             .or_else(|| main.map(names::process_name))
             .unwrap_or_else(|| service_name(&u.name));
         (name, Kind::App)
-    } else if let Some((name, detail)) = names::login_session(&u.name) {
+    } else if let Some((name, detail, graphical)) = names::login_session(&u.name) {
         instance = detail.clone();
         node.detail = detail;
-        (name, Kind::SystemService)
+        (name, if graphical { Kind::Session } else { Kind::SystemService })
     } else if u.name == "init.scope" {
         (
             if is_user {
@@ -654,6 +656,14 @@ fn unit_items(
     };
 
     let mut rows = match kind {
+        Kind::Session => {
+            let (rows, js) = session_breakdown(&procs, &set, acc, ctx.split_terminals);
+            for j in &js {
+                node.sub_values(j);
+            }
+            jobs = js;
+            rows
+        }
         Kind::Terminal => {
             let (rows, js) = terminal_breakdown(&procs, &set, acc, ctx.split_terminals);
             for j in &js {
@@ -684,7 +694,7 @@ fn unit_items(
     for j in jobs {
         items.push(Item {
             group: j.name.clone(),
-            kind: Kind::Job,
+            kind: j.kind,
             instance: j.detail.clone(),
             node: j,
             profile_key: None,
@@ -921,6 +931,87 @@ fn label_rows(procs: &[&Proc], acc: &Acc, label: impl Fn(&Proc) -> String) -> Ve
     merge_same(rows)
 }
 
+/// Rows for a graphical session, and the programs to lift out to the top level when not splitting.
+fn session_breakdown(procs: &[&Proc], set: &HashSet<u32>, acc: &Acc, split: bool) -> (Vec<Node>, Vec<Node>) {
+    let mut rows = Vec::new();
+    let mut jobs = Vec::new();
+    let mut infra = Node::new(tr("session, launchers", "munkamenet, indítók"), "", Kind::Rest);
+    for p in procs.iter().filter(|p| !set.contains(&p.ppid)) {
+        session_walk(p.pid, set, acc, split, &mut rows, &mut jobs, &mut infra);
+    }
+    let mut rows = merge_same(rows);
+    if infra.procs > 0 {
+        rows.push(infra);
+    }
+    (rows, jobs)
+}
+
+fn session_walk(
+    pid: u32,
+    set: &HashSet<u32>,
+    acc: &Acc,
+    split: bool,
+    rows: &mut Vec<Node>,
+    jobs: &mut Vec<Node>,
+    infra: &mut Node,
+) {
+    let p = &acc.cur.procs[&pid];
+    if names::is_session_infra(p) {
+        acc.add(infra, pid);
+        for c in acc.kids(pid, set) {
+            session_walk(c, set, acc, split, rows, jobs, infra);
+        }
+        return;
+    }
+    // the program with the helpers that belong to it; other programs it starts get rows of their own
+    let mut node = Node::new(desktop_or_process_name(p, acc), "", Kind::App);
+    let mut others = Vec::new();
+    let mut stack = vec![pid];
+    while let Some(x) = stack.pop() {
+        acc.add(&mut node, x);
+        for c in acc.kids(x, set) {
+            if names::same_program(&acc.cur.procs[&x], &acc.cur.procs[&c]) {
+                stack.push(c);
+            } else {
+                others.push(c);
+            }
+        }
+    }
+    if names::is_terminal(p) {
+        // a terminal inside the session: what runs in it follows the terminal rules
+        let mut t_rows = Vec::new();
+        let mut shells = Node::new(tr("terminal, shells", "terminál, shellek"), "", Kind::Rest);
+        for c in others {
+            terminal_walk(c, set, acc, split, &mut t_rows, jobs, &mut shells);
+        }
+        node.add_values(&shells);
+        if split {
+            let mut children = merge_same(t_rows);
+            for r in &children {
+                node.add_values(r);
+            }
+            children.push(shells);
+            node.children = children;
+        }
+    } else {
+        for c in others {
+            session_walk(c, set, acc, split, rows, jobs, infra);
+        }
+    }
+    node.targets = vec![Target::Procs(node.pids.clone())];
+    if split { rows.push(node) } else { jobs.push(node) }
+}
+
+fn desktop_or_process_name(p: &Proc, acc: &Acc) -> String {
+    let name = names::process_name(p);
+    if name == names::exe_basename(p)
+        && let Some(d) = acc.desktop.by_exe(&name)
+    {
+        return d.to_string();
+    }
+    name
+}
+
 /// Rows for a terminal, and the jobs to lift out to the top level when not splitting.
 fn terminal_breakdown(procs: &[&Proc], set: &HashSet<u32>, acc: &Acc, split: bool) -> (Vec<Node>, Vec<Node>) {
     let mut rows = Vec::new();
@@ -1107,7 +1198,13 @@ fn add_process_level(n: &mut Node, acc: &Acc) {
         .map(|&(pid, _)| {
             let p = &acc.cur.procs[&pid];
             let label = if same_label { n.name.clone() } else { generic_label(p) };
-            let mut c = Node::new(label, format!("PID {pid} · {}", short_args(p)), Kind::Proc);
+            let args = short_args(p);
+            let detail = if args.is_empty() {
+                format!("PID {pid}")
+            } else {
+                format!("PID {pid} · {args}")
+            };
+            let mut c = Node::new(label, detail, Kind::Proc);
             c.ident = Some(pid.to_string());
             acc.add(&mut c, pid);
             c.targets = vec![Target::Procs(c.pids.clone())];

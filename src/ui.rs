@@ -1293,6 +1293,7 @@ fn kind_label(k: Kind) -> &'static str {
         Kind::UserService => tr("user service", "felhasználói szolgáltatás"),
         Kind::SystemService => tr("system service", "rendszerszolgáltatás"),
         Kind::Kernel => "kernel",
+        Kind::Session => tr("login session", "munkamenet"),
         Kind::Job => tr("started from a terminal", "terminálból indítva"),
         Kind::Group => tr("group", "csoport"),
         Kind::Proc => tr("process", "folyamat"),

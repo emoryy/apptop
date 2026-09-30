@@ -8,7 +8,8 @@ use crate::collect::Proc;
 #[derive(Default)]
 pub struct DesktopIndex {
     by_id: HashMap<String, String>,
-    by_exe: HashMap<String, String>,
+    /// exe basename -> (name, rank); lower rank wins, see `exec_rank`
+    by_exe: HashMap<String, (String, u8)>,
 }
 
 impl DesktopIndex {
@@ -49,12 +50,16 @@ impl DesktopIndex {
                 continue;
             }
             let Ok(text) = fs::read_to_string(&path) else { continue };
-            let (name, exec) = parse_desktop(&text);
+            let (name, exec, hidden) = parse_desktop(&text);
             let Some(name) = name else { continue };
             if let Some(exec) = exec
                 && let Some(bin) = exec_binary(&exec)
             {
-                self.by_exe.entry(bin).or_insert_with(|| name.clone());
+                let rank = exec_rank(&exec, hidden);
+                let e = self.by_exe.entry(bin).or_insert_with(|| (name.clone(), rank));
+                if rank < e.1 {
+                    *e = (name.clone(), rank);
+                }
             }
             self.by_id.insert(id, name);
         }
@@ -65,13 +70,29 @@ impl DesktopIndex {
     }
 
     pub fn by_exe(&self, exe_basename: &str) -> Option<&str> {
-        self.by_exe.get(exe_basename).map(String::as_str)
+        self.by_exe.get(exe_basename).map(|(n, _)| n.as_str())
     }
 }
 
-fn parse_desktop(text: &str) -> (Option<String>, Option<String>) {
+/// How well a desktop entry names its binary: 0 = plain launcher, 1 = launches the binary with
+/// options ("xfce4-panel --add=launcher"), 2 = hidden from menus. Helper entries must not name the program.
+fn exec_rank(exec: &str, hidden: bool) -> u8 {
+    if hidden {
+        return 2;
+    }
+    let mut words = exec.split_whitespace();
+    let first = words.next().unwrap_or("");
+    let rest: Vec<&str> = if first == "env" || first.ends_with("/env") {
+        words.skip_while(|w| w.contains('=')).skip(1).collect()
+    } else {
+        words.collect()
+    };
+    if rest.iter().all(|w| w.starts_with('%')) { 0 } else { 1 }
+}
+
+fn parse_desktop(text: &str) -> (Option<String>, Option<String>, bool) {
     let mut in_entry = false;
-    let (mut name, mut exec) = (None, None);
+    let (mut name, mut exec, mut hidden) = (None, None, false);
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -85,9 +106,11 @@ fn parse_desktop(text: &str) -> (Option<String>, Option<String>) {
             name.get_or_insert_with(|| v.to_string());
         } else if let Some(v) = line.strip_prefix("Exec=") {
             exec.get_or_insert_with(|| v.to_string());
+        } else if line == "NoDisplay=true" || line == "Hidden=true" {
+            hidden = true;
         }
     }
-    (name, exec)
+    (name, exec, hidden)
 }
 
 fn exec_binary(exec: &str) -> Option<String> {
@@ -214,6 +237,46 @@ pub fn is_interactive_shell(p: &Proc) -> bool {
     p.cmdline.iter().skip(1).all(|a| a.starts_with('-') && a != "-c")
 }
 
+/// Processes that start and hold a desktop session together; the programs below them are what counts.
+const SESSION_INFRA: &[&str] = &[
+    "lightdm",
+    "sddm-helper",
+    "gdm-session-worker",
+    "xinit",
+    "startx",
+    "startxfce4",
+    "xfce4-session",
+    "startplasma-x11",
+    "startplasma-wayland",
+    "plasma_session",
+    "gnome-session-binary",
+    "gnome-session-ctl",
+    "lxsession",
+    "lxqt-session",
+    "mate-session",
+    "cinnamon-session",
+    "budgie-session",
+    "dbus-launch",
+    "dbus-daemon",
+    "dbus-broker-launch",
+    "dbus-broker",
+    "ssh-agent",
+    "uwsm",
+];
+
+pub fn is_session_infra(p: &Proc) -> bool {
+    let exe = exe_basename(p);
+    // `sh -c "program"` wrappers only pass the program on
+    let shell_wrapper = SHELLS.contains(&exe.as_str()) && p.cmdline.iter().any(|a| a == "-c");
+    SESSION_INFRA.contains(&exe.as_str()) || shell_wrapper || is_interactive_shell(p)
+}
+
+/// A child that is part of its parent program rather than a program of its own.
+pub fn same_program(parent: &Proc, child: &Proc) -> bool {
+    let (pe, ce) = (exe_basename(parent), exe_basename(child));
+    pe == ce || (pe == "xfce4-panel" && ce == "wrapper-2.0") || (ce == "wrapper-1.0" && pe == "xfce4-panel")
+}
+
 pub fn is_zellij_client(p: &Proc) -> bool {
     exe_basename(p) == "zellij" && !p.cmdline.iter().any(|a| a == "--server")
 }
@@ -263,6 +326,11 @@ pub fn process_name(p: &Proc) -> String {
     }
     if let Some(s) = zellij_server_session(p) {
         return format!("zellij: {s}");
+    }
+    // xfce4-panel plugins: wrapper-2.0 <plugin.so> <id> <socket> <name> <display name> <comment>
+    if exe.starts_with("wrapper-") && p.cmdline.get(1).is_some_and(|a| a.contains("/panel/plugins/")) {
+        let shown = p.cmdline.get(5).or(p.cmdline.get(4)).cloned().unwrap_or(exe.clone());
+        return format!("{}: {shown}", crate::i18n::tr("panel", "panel"));
     }
 
     let interp = interpreter_kind(&exe);
@@ -434,7 +502,7 @@ fn expand_specifiers(desc: &str, unit: &str) -> String {
 
 /// A logind session scope (`session-12.scope`) described from /run/systemd/sessions:
 /// graphical, SSH or console, plus tty / remote host.
-pub fn login_session(unit: &str) -> Option<(String, String)> {
+pub fn login_session(unit: &str) -> Option<(String, String, bool)> {
     let id = unit.strip_prefix("session-")?.strip_suffix(".scope")?;
     let text = fs::read_to_string(format!("/run/systemd/sessions/{id}")).ok()?;
     let get = |k: &str| {
@@ -454,12 +522,13 @@ pub fn login_session(unit: &str) -> Option<(String, String)> {
         crate::i18n::tr("login session", "bejelentkezési munkamenet")
     };
     let mut detail = vec![format!("#{id}")];
+    let graphical = kind == "x11" || kind == "wayland";
     for part in [service, kind, get("TTY"), get("REMOTE_HOST")] {
         if !part.is_empty() && part != "unspecified" && !detail.contains(&part) {
             detail.push(part);
         }
     }
-    Some((name.to_string(), detail.join(" · ")))
+    Some((name.to_string(), detail.join(" · "), graphical))
 }
 
 fn lookup_description(unit: &str, user: bool) -> Option<String> {
@@ -607,6 +676,14 @@ mod tests {
             &["bash", "-c", "make"],
             None
         )));
+    }
+
+    #[test]
+    fn helper_desktop_entries_rank_below_plain_ones() {
+        assert_eq!(exec_rank("thunar %F", false), 0);
+        assert_eq!(exec_rank("xfce4-panel --add=launcher %F", false), 1);
+        assert_eq!(exec_rank("env FOO=1 app %U", false), 0);
+        assert_eq!(exec_rank("app", true), 2);
     }
 
     #[test]
