@@ -398,10 +398,68 @@ impl UnitDescriptions {
         if let Some(v) = self.cache.get(&key) {
             return v.clone();
         }
-        let v = lookup_description(unit, user);
+        let v = lookup_description(unit, user).map(|d| expand_specifiers(&d, unit));
         self.cache.insert(key, v.clone());
         v
     }
+}
+
+/// systemd's `%i`, `%I`, `%f` and friends in a template's Description; unknown ones are dropped.
+fn expand_specifiers(desc: &str, unit: &str) -> String {
+    let instance = unit
+        .split_once('@')
+        .map(|(_, rest)| rest.rsplit_once('.').map(|(i, _)| i).unwrap_or(rest))
+        .unwrap_or("");
+    let unescaped = unescape_unit(instance);
+    let mut out = String::new();
+    let mut chars = desc.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('i') => out.push_str(instance),
+            Some('I') => out.push_str(&unescaped),
+            Some('f') => {
+                out.push('/');
+                out.push_str(&unescape_unit(&instance.replace('-', "/")));
+            }
+            Some('%') => out.push('%'),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A logind session scope (`session-12.scope`) described from /run/systemd/sessions:
+/// graphical, SSH or console, plus tty / remote host.
+pub fn login_session(unit: &str) -> Option<(String, String)> {
+    let id = unit.strip_prefix("session-")?.strip_suffix(".scope")?;
+    let text = fs::read_to_string(format!("/run/systemd/sessions/{id}")).ok()?;
+    let get = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+            .unwrap_or("")
+            .to_string()
+    };
+    let (kind, service) = (get("TYPE"), get("SERVICE"));
+    let name = if service == "sshd" {
+        crate::i18n::tr("SSH session", "SSH munkamenet")
+    } else if kind == "x11" || kind == "wayland" {
+        crate::i18n::tr("desktop session", "grafikus munkamenet")
+    } else if kind == "tty" {
+        crate::i18n::tr("console session", "konzolos munkamenet")
+    } else {
+        crate::i18n::tr("login session", "bejelentkezési munkamenet")
+    };
+    let mut detail = vec![format!("#{id}")];
+    for part in [service, kind, get("TTY"), get("REMOTE_HOST")] {
+        if !part.is_empty() && part != "unspecified" && !detail.contains(&part) {
+            detail.push(part);
+        }
+    }
+    Some((name.to_string(), detail.join(" · ")))
 }
 
 fn lookup_description(unit: &str, user: bool) -> Option<String> {
@@ -549,6 +607,19 @@ mod tests {
             &["bash", "-c", "make"],
             None
         )));
+    }
+
+    #[test]
+    fn expands_template_specifiers() {
+        assert_eq!(
+            expand_specifiers(
+                "GnuPG network certificate management daemon for %f",
+                "dirmngr@etc-pacman.d-gnupg.socket"
+            ),
+            "GnuPG network certificate management daemon for /etc/pacman.d/gnupg"
+        );
+        assert_eq!(expand_specifiers("Getty on %I", "getty@tty1.service"), "Getty on tty1");
+        assert_eq!(expand_specifiers("100%% plain", "x.service"), "100% plain");
     }
 
     #[test]

@@ -321,7 +321,8 @@ pub fn build(mut ctx: Ctx) -> Model {
     ctx.docker.ensure(&container_ids);
 
     let mut items: Vec<Item> = Vec::new();
-    let mut profile_names: HashMap<String, String> = HashMap::new();
+    // profile key -> (name, from a desktop entry); desktop names win over names made from the main process
+    let mut profile_names: HashMap<String, (String, bool)> = HashMap::new();
     for u in units.values_mut() {
         if u.pids.is_empty() {
             continue;
@@ -332,7 +333,7 @@ pub fn build(mut ctx: Ctx) -> Model {
 
     let mut groups: BTreeMap<String, Vec<Item>> = BTreeMap::new();
     for mut it in items {
-        if let Some(n) = it.profile_key.as_ref().and_then(|k| profile_names.get(k)) {
+        if let Some((n, _)) = it.profile_key.as_ref().and_then(|k| profile_names.get(k)) {
             it.group = n.clone();
         }
         groups.entry(it.group.clone()).or_default().push(it);
@@ -526,7 +527,7 @@ fn unit_items(
     acc: &Acc,
     elapsed: f64,
     items: &mut Vec<Item>,
-    profile_names: &mut HashMap<String, String>,
+    profile_names: &mut HashMap<String, (String, bool)>,
 ) {
     let cur = acc.cur;
     let procs: Vec<&Proc> = u.pids.iter().map(|pid| &cur.procs[pid]).collect();
@@ -566,7 +567,10 @@ fn unit_items(
         (name, Kind::Terminal)
     } else if let Some(key) = browser_profile_key(&procs, cur) {
         if let Some(n) = &desktop_name {
-            profile_names.entry(key.clone()).or_insert_with(|| n.clone());
+            let e = profile_names.entry(key.clone()).or_insert_with(|| (n.clone(), true));
+            if !e.1 {
+                *e = (n.clone(), true);
+            }
         }
         let bm = procs.iter().find(|p| names::is_chromium_browser_main(p));
         let fallback = match bm {
@@ -583,6 +587,12 @@ fn unit_items(
             }
             None => desktop_name.clone().unwrap_or_else(|| tr("browser", "böngésző").into()),
         };
+        if bm.is_some() {
+            // renderers left in another cgroup take the name of the unit that holds the main process
+            profile_names
+                .entry(key.clone())
+                .or_insert_with(|| (fallback.clone(), false));
+        }
         profile_key = Some(key);
         (fallback, Kind::Browser)
     } else if is_app {
@@ -591,6 +601,10 @@ fn unit_items(
             .or_else(|| main.map(names::process_name))
             .unwrap_or_else(|| service_name(&u.name));
         (name, Kind::App)
+    } else if let Some((name, detail)) = names::login_session(&u.name) {
+        instance = detail.clone();
+        node.detail = detail;
+        (name, Kind::SystemService)
     } else if u.name == "init.scope" {
         (
             if is_user {
