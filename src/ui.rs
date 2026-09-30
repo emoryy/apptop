@@ -1458,7 +1458,12 @@ fn share_totals(m: &Model) -> Totals {
         mem: s.mem_total as f64,
         swap: s.swap_total as f64,
         // the VRAM column includes GTT, so its share is of both pools
-        vram: s.gpu.as_ref().map(|g| (g.total + g.gtt_total) as f64).unwrap_or(0.0),
+        // system memory mapped by a GPU without a known pool size can be as large as RAM
+        vram: s
+            .gpu
+            .as_ref()
+            .map(|g| (g.total + g.gtt_total + if g.gtt_unbounded { s.mem_total } else { 0 }) as f64)
+            .unwrap_or(0.0),
         cpu: s.ncpu as f64 * 100.0,
         io: m.roots.iter().map(|r| r.io_read + r.io_write).sum(),
         procs: m.roots.iter().map(|r| r.procs).sum::<usize>() as f64,

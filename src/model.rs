@@ -503,11 +503,26 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
     for su in spawn_units {
         let pids = units[&su].pids.clone();
         let in_unit: HashSet<u32> = pids.iter().copied().collect();
-        let owner = pids
+        // the unit that spawned most of the tab's root processes; a job left behind by a closed tab
+        // is reparented to systemd, which owns nothing
+        let mut votes: BTreeMap<String, usize> = BTreeMap::new();
+        for p in pids
             .iter()
             .filter_map(|p| cur.procs.get(p))
             .filter(|p| !in_unit.contains(&p.ppid))
-            .find_map(|p| unit_of.get(&p.ppid).filter(|pu| **pu != su).cloned());
+        {
+            let Some(parent) = cur.procs.get(&p.ppid) else { continue };
+            if parent.pid == 1 || parent.comm == "systemd" {
+                continue;
+            }
+            if let Some(pu) = unit_of.get(&parent.pid).filter(|pu| **pu != su) {
+                *votes.entry(pu.clone()).or_default() += 1;
+            }
+        }
+        let owner = votes
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+            .map(|(u, _)| u);
         let Some(owner) = owner else { continue };
         for &x in &pids {
             let q = &cur.procs[&x];
@@ -726,7 +741,12 @@ fn unit_items(
     } else if let Some((name, detail, graphical)) = names::login_session(&u.name) {
         instance = detail.clone();
         node.detail = detail;
-        (name, if graphical { Kind::Session } else { Kind::SystemService })
+        // `startx` from a console login keeps TYPE=tty, but a desktop runs in it all the same
+        let desktop = graphical
+            || procs.iter().any(|p| {
+                names::is_terminal(p) || matches!(names::exe_basename(p).as_str(), "Xorg" | "X" | "Xwayland" | "xinit")
+            });
+        (name, if desktop { Kind::Session } else { Kind::SystemService })
     } else if let Some(wm) = names::unescape_unit(&u.name)
         .strip_prefix("wayland-wm@")
         .and_then(|r| r.strip_suffix(".service"))
@@ -813,7 +833,14 @@ fn unit_items(
                 generic_label(p)
             }
         }),
-        _ => label_rows(&procs, acc, generic_label),
+        // Chromium-family processes keep their roles wherever they run (Flatpak, apps built on it)
+        _ => label_rows(&procs, acc, |p| {
+            if names::CHROMIUM_FAMILY.contains(&names::exe_basename(p).as_str()) {
+                chromium_label(p)
+            } else {
+                generic_label(p)
+            }
+        }),
     };
     if rows.len() > 1 || rows.iter().any(|r| !r.children.is_empty()) || kind == Kind::Terminal {
         if node.cache.is_some() {
@@ -944,8 +971,22 @@ fn group_node(name: String, mut items: Vec<Item>) -> Node {
         node.add_values(&it.node);
     }
     if items.iter().all(|i| i.profile_key.is_some()) {
-        // cgroups of one browser profile, one Flatpak app or one terminal program: one combined breakdown
-        node.children = merge_same(items.into_iter().flat_map(|i| i.node.children).collect());
+        // cgroups of one browser profile, one Flatpak app or one terminal program: one combined
+        // breakdown; a cgroup too small to have rows of its own (a one-process helper) is a row itself
+        let rows = items
+            .into_iter()
+            .flat_map(|i| {
+                if i.node.children.is_empty() {
+                    let mut n = i.node;
+                    n.name = if i.instance.is_empty() { n.name } else { i.instance };
+                    n.detail.clear();
+                    vec![n]
+                } else {
+                    i.node.children
+                }
+            })
+            .collect();
+        node.children = merge_same(rows);
         return node;
     }
     match kind {

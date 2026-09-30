@@ -221,8 +221,6 @@ const TERMINALS: &[&str] = &[
     "kgx",
     "ptyxis",
     "ptyxis-agent",
-    // kitty's own helpers (__atexit__, __watch_conf__, run-shell)
-    "kitten",
 ];
 pub const CHROMIUM_FAMILY: &[&str] = &[
     "vivaldi-bin",
@@ -236,7 +234,16 @@ pub const CHROMIUM_FAMILY: &[&str] = &[
 ];
 
 pub fn is_terminal(p: &Proc) -> bool {
-    TERMINALS.contains(&exe_basename(p).as_str())
+    let exe = exe_basename(p);
+    // kitten is also a user command (kitten ssh, icat, diff); only kitty's own helpers
+    // (__atexit__, __watch_conf__, run-shell) are part of the terminal
+    if exe == "kitten" {
+        return p
+            .cmdline
+            .get(1)
+            .is_some_and(|a| a.starts_with("__") || a == "run-shell");
+    }
+    TERMINALS.contains(&exe.as_str())
 }
 
 /// An interactive shell (no script argument) only hosts what runs inside it.
@@ -725,6 +732,17 @@ mod tests {
         );
         assert_eq!(expand_specifiers("Getty on %I", "getty@tty1.service"), "Getty on tty1");
         assert_eq!(expand_specifiers("100%% plain", "x.service"), "100% plain");
+    }
+
+    #[test]
+    fn only_kittys_own_kittens_are_terminal() {
+        assert!(is_terminal(&proc(
+            "/usr/bin/kitten",
+            &["/usr/bin/kitten", "__atexit__"],
+            None
+        )));
+        assert!(!is_terminal(&proc("/usr/bin/kitten", &["kitten", "ssh", "host"], None)));
+        assert!(is_terminal(&proc("/usr/bin/kitty", &["kitty"], None)));
     }
 
     #[test]

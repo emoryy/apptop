@@ -16,6 +16,8 @@ pub struct GpuSample {
     /// system memory the GPU drivers have mapped for the GPU (GTT), over all non-NVIDIA GPUs
     pub gtt_used: u64,
     pub gtt_total: u64,
+    /// some GPU maps system memory without a known pool size (i915/xe), so shares use all RAM
+    pub gtt_unbounded: bool,
     pub util: u32,
     /// GPU memory per pid (VRAM + GTT), summed over devices
     pub per_pid: HashMap<u32, u64>,
@@ -109,11 +111,14 @@ struct Drm {
     cards: Vec<DrmCard>,
     /// (pid, start time) -> (fds pointing at /dev/dri, sample number of the scan)
     fds: HashMap<(u32, u64), (Vec<String>, u64)>,
-    /// (pid, pdev, client id, engine) -> busy ns at the previous sample
-    prev_busy: HashMap<(u32, String, u64, String), u64>,
+    /// (pid, pdev, client id, engine) -> (busy ns or cycles, total cycles) at the previous sample
+    prev_busy: BusyCounters,
     prev_at: Option<Instant>,
     sample_no: u64,
 }
+
+/// (pid, pdev, client id, engine) -> (busy ns or cycles, total cycles)
+type BusyCounters = HashMap<(u32, String, u64, String), (u64, Option<u64>)>;
 
 /// Listing a process's fds is the expensive part; the result is reused for this many samples.
 const FD_RESCAN: u64 = 15;
@@ -159,10 +164,17 @@ impl Drm {
         self.sample_no += 1;
         let read_u64 = |p: PathBuf| fs::read_to_string(p).ok().and_then(|v| v.trim().parse::<u64>().ok());
         let mut have_busy = false;
+        let mut sysfs_gtt = false;
         for c in &self.cards {
             s.used += read_u64(c.dir.join("mem_info_vram_used")).unwrap_or(0);
             s.total += read_u64(c.dir.join("mem_info_vram_total")).unwrap_or(0);
-            s.gtt_used += read_u64(c.dir.join("mem_info_gtt_used")).unwrap_or(0);
+            match read_u64(c.dir.join("mem_info_gtt_used")) {
+                Some(g) => {
+                    s.gtt_used += g;
+                    sysfs_gtt = true;
+                }
+                None => s.gtt_unbounded = true,
+            }
             s.gtt_total += read_u64(c.dir.join("mem_info_gtt_total")).unwrap_or(0);
             if let Some(b) = read_u64(c.dir.join("gpu_busy_percent")) {
                 s.util = s.util.max(b as u32);
@@ -176,17 +188,24 @@ impl Drm {
             .map(|t| now.duration_since(t).as_nanos() as f64)
             .unwrap_or(0.0);
         self.prev_at = Some(now);
-        let mut busy_now: HashMap<(u32, String, u64, String), u64> = HashMap::new();
+        let mut busy_now: BusyCounters = HashMap::new();
+        // device load per engine, summed over clients; the busiest engine is the device's load
+        let mut engine_load: HashMap<(String, String), f64> = HashMap::new();
+        let mut drm_gtt = 0u64;
         self.fds
             .retain(|(pid, st), _| procs.get(pid).is_some_and(|p| p.start_time == *st));
 
         // /proc/<pid>/io is readable exactly for the processes whose fdinfo is readable too
         for p in procs.values().filter(|p| p.io.is_some()) {
             let key = (p.pid, p.start_time);
-            let stale = self
-                .fds
-                .get(&key)
-                .is_none_or(|(_, at)| self.sample_no - at >= FD_RESCAN);
+            // rescans are spread over the interval by pid, and processes without a GPU fd yet are
+            // looked at more often, since a program opens the render node some time after it starts
+            let phase = self.sample_no + p.pid as u64;
+            let stale = match self.fds.get(&key) {
+                None => true,
+                Some((fds, _)) if fds.is_empty() => phase % 3 == 0,
+                Some(_) => phase % FD_RESCAN == 0,
+            };
             if stale {
                 self.fds.insert(key, (drm_fds(p.pid), self.sample_no));
             }
@@ -205,20 +224,28 @@ impl Drm {
             for ((pdev, id), c) in clients {
                 mem += c.vram + c.gtt;
                 gtt += c.gtt;
-                for (engine, ns, capacity) in c.engines {
-                    let k = (p.pid, pdev.clone(), id, engine);
-                    if let Some(prev) = self.prev_busy.get(&k)
-                        && elapsed_ns > 0.0
-                    {
-                        let u = ns.saturating_sub(*prev) as f64 / (elapsed_ns * capacity.max(1) as f64) * 100.0;
-                        util = util.max(u);
+                for e in c.engines {
+                    let k = (p.pid, pdev.clone(), id, e.name.clone());
+                    if let Some(&(prev, prev_total)) = self.prev_busy.get(&k) {
+                        let busy = e.busy.saturating_sub(prev) as f64;
+                        // cycles (xe) are measured against the engine's own total; ns against wall time
+                        let span = match (e.total, prev_total) {
+                            (Some(t), Some(pt)) => t.saturating_sub(pt) as f64,
+                            _ => elapsed_ns,
+                        };
+                        if span > 0.0 {
+                            let u = busy / (span * e.capacity.max(1) as f64) * 100.0;
+                            util = util.max(u);
+                            *engine_load.entry((pdev.clone(), e.name.clone())).or_default() += u;
+                        }
                     }
-                    busy_now.insert(k, ns);
+                    busy_now.insert(k, (e.busy, e.total));
                 }
             }
             if mem > 0 {
                 *s.per_pid.entry(p.pid).or_default() += mem;
                 *s.gtt_per_pid.entry(p.pid).or_default() += gtt;
+                drm_gtt += gtt;
             }
             if util >= 0.5 {
                 *s.util_per_pid.entry(p.pid).or_default() += util.min(100.0).round() as u32;
@@ -226,11 +253,13 @@ impl Drm {
         }
         self.prev_busy = busy_now;
         if !have_busy {
-            // i915/xe have no device-wide busy file: the busiest visible client stands in for it
-            s.util = s.util.max(s.util_per_pid.values().copied().max().unwrap_or(0).min(100));
+            // i915/xe have no device-wide busy file: the clients' load on the busiest engine stands in
+            let load = engine_load.values().fold(0.0f64, |a, b| a.max(*b)).min(100.0);
+            s.util = s.util.max(load.round() as u32);
         }
-        if s.total == 0 {
-            s.gtt_used = s.gtt_used.max(s.gtt_per_pid.values().sum());
+        if !sysfs_gtt {
+            // no pool counter in sysfs: what the visible clients have mapped (also next to NVIDIA)
+            s.gtt_used += drm_gtt;
         }
     }
 }
@@ -245,13 +274,21 @@ fn drm_fds(pid: u32) -> Vec<String> {
         .collect()
 }
 
+struct Engine {
+    name: String,
+    /// busy ns (drm-engine-*) or busy cycles (drm-cycles-*, xe)
+    busy: u64,
+    /// total cycles for cycle counters (drm-total-cycles-*)
+    total: Option<u64>,
+    capacity: u64,
+}
+
 struct Client {
     pdev: String,
     id: u64,
     vram: u64,
     gtt: u64,
-    /// (engine, busy ns, capacity)
-    engines: Vec<(String, u64, u64)>,
+    engines: Vec<Engine>,
 }
 
 /// "96856 KiB" / "12 MiB" / "4096" -> bytes
@@ -299,17 +336,36 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
             gtt += parse_size(v);
         }
     }
+    let num = |v: &str| {
+        v.split_whitespace()
+            .next()
+            .and_then(|x| x.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let capacity = |name: &str| {
+        kv.get(format!("drm-engine-capacity-{name}").as_str())
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(1)
+    };
     let mut engines = Vec::new();
     for (k, v) in &kv {
         if let Some(name) = k.strip_prefix("drm-engine-")
             && !name.starts_with("capacity-")
         {
-            let ns = v.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0);
-            let cap = kv
-                .get(format!("drm-engine-capacity-{name}").as_str())
-                .and_then(|c| c.parse().ok())
-                .unwrap_or(1);
-            engines.push((name.to_string(), ns, cap));
+            engines.push(Engine {
+                name: name.to_string(),
+                busy: num(v),
+                total: None,
+                capacity: capacity(name),
+            });
+        } else if let Some(name) = k.strip_prefix("drm-cycles-") {
+            let total = kv.get(format!("drm-total-cycles-{name}").as_str()).map(|t| num(t));
+            engines.push(Engine {
+                name: name.to_string(),
+                busy: num(v),
+                total,
+                capacity: capacity(name),
+            });
         }
     }
     Some(Client {

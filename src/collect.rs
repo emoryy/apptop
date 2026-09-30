@@ -248,7 +248,9 @@ fn read_proc(pid: u32, cache: &mut ProcCache) -> Option<Proc> {
         fs::read_link(base.join("cwd")).ok()
     };
     // other users' counters are not readable; skip the failing syscalls
-    let io = if kernel_thread || uid != my_uid() {
+    // root can read everyone's counters; a normal user only its own
+    let me = my_uid();
+    let io = if kernel_thread || (uid != me && me != 0) {
         None
     } else {
         read_io(&base)
