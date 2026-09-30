@@ -51,6 +51,8 @@ pub struct Node {
     pub swap: u64,
     pub cache: Option<u64>,
     pub vram: u64,
+    /// the part of `vram` that is system memory mapped for the GPU (AMD/Intel GTT)
+    pub gtt: u64,
     pub procs: usize,
     /// how many identical siblings this row stands for
     pub count: usize,
@@ -80,6 +82,7 @@ impl Node {
             swap: 0,
             cache: None,
             vram: 0,
+            gtt: 0,
             procs: 0,
             count: 1,
             ident: None,
@@ -99,6 +102,7 @@ impl Node {
         self.mem += o.mem;
         self.swap += o.swap;
         self.vram += o.vram;
+        self.gtt += o.gtt;
         self.procs += o.procs;
         if let Some(c) = o.cache {
             self.cache = Some(self.cache.unwrap_or(0) + c);
@@ -119,6 +123,7 @@ impl Node {
         self.mem = self.mem.saturating_sub(o.mem);
         self.swap = self.swap.saturating_sub(o.swap);
         self.vram = self.vram.saturating_sub(o.vram);
+        self.gtt = self.gtt.saturating_sub(o.gtt);
         self.procs = self.procs.saturating_sub(o.procs);
         self.io_read = (self.io_read - o.io_read).max(0.0);
         self.io_write = (self.io_write - o.io_write).max(0.0);
@@ -227,6 +232,7 @@ struct Acc<'a> {
     proc_io: HashMap<u32, (f64, f64)>,
     gpu_util: HashMap<u32, u32>,
     vram: HashMap<u32, u64>,
+    gtt: HashMap<u32, u64>,
     children_of: HashMap<u32, Vec<u32>>,
 }
 
@@ -237,6 +243,7 @@ impl Acc<'_> {
         node.swap += p.swap;
         node.cpu += self.proc_cpu[&pid];
         node.vram += self.vram.get(&pid).copied().unwrap_or(0);
+        node.gtt += self.gtt.get(&pid).copied().unwrap_or(0);
         node.procs += 1;
         let (r, w) = self.proc_io.get(&pid).copied().unwrap_or_default();
         node.io_read += r;
@@ -312,6 +319,7 @@ pub fn build(mut ctx: Ctx) -> Model {
         proc_io,
         gpu_util: ctx.gpu.as_ref().map(|g| g.util_per_pid.clone()).unwrap_or_default(),
         vram: ctx.gpu.as_ref().map(|g| g.per_pid.clone()).unwrap_or_default(),
+        gtt: ctx.gpu.as_ref().map(|g| g.gtt_per_pid.clone()).unwrap_or_default(),
         children_of,
     };
 
@@ -467,6 +475,7 @@ fn unit_values(u: &Unit, acc: &Acc, elapsed: f64) -> Node {
     let mut node = Node::new("", "", Kind::App);
     node.procs = u.pids.len();
     node.vram = u.pids.iter().map(|p| acc.vram.get(p).copied().unwrap_or(0)).sum();
+    node.gtt = u.pids.iter().map(|p| acc.gtt.get(p).copied().unwrap_or(0)).sum();
     for &p in &u.pids {
         let (r, w) = acc.proc_io.get(&p).copied().unwrap_or_default();
         node.io_read += r;

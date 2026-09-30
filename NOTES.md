@@ -33,6 +33,14 @@ process with gigabytes mapped (an LLM server holding 7 GB of CUDA host memory to
 the value is cached until RssShmem moves by 5% or 20 samples pass. Without this, one sample
 cost ~250 ms of system time.
 
+## GPUs other than NVIDIA (src/gpu.rs)
+
+NVIDIA goes through NVML. Every other DRM driver (amdgpu, i915, xe, ...) is read the way nvtop does it: device totals from sysfs (`mem_info_vram_used/total`, `mem_info_gtt_used/total`, `gpu_busy_percent` where the driver has it), per process from `/proc/<pid>/fdinfo/<fd>` of the fds that point at `/dev/dri/*`. Memory is `drm-resident-vram` + `drm-resident-gtt` (older kernels: `drm-memory-*`); GPU% is the busiest engine's `drm-engine-<name>` ns delta over the interval, divided by `drm-engine-capacity-<name>`. Several fds of one process can share a DRM client, so clients are counted once per (`drm-pdev`, `drm-client-id`).
+
+GTT is system RAM the driver maps for the GPU. It is not charged to the memory cgroup (no GPU/TTM field in `memory.stat`) and not part of RssAnon/RssShmem, so adding it to the VRAM column counts nothing twice; only the summary RAM meter includes it, as all used RAM. Buffers shared between a program and the compositor are counted for both, as in nvtop.
+
+Listing a process's fds is the costly part, so the list of DRM fds is cached per process and rescanned every 15 samples. Only processes whose `/proc/<pid>/io` is readable are scanned: the same permission check guards fdinfo. Cards bound to `nvidia*` are skipped, so a machine with only an NVIDIA GPU does no fd scanning at all. On an AMD laptop with ~490 processes apptop used 1 tick of CPU in 20 s.
+
 ## Grouping rules (src/model.rs)
 
 - A unit is the first `.service`/`.scope` in the cgroup path (`user@<uid>.service` is descended

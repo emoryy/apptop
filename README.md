@@ -34,8 +34,7 @@ row with totals you can compare, and expand into their parts when you want the d
 - Linux with the unified cgroup v2 hierarchy (the default on current systemd distributions).
 - A systemd user session for per-application grouping. KDE Plasma and GNOME launch apps into
   their own scopes; without that, apps fall under their parent's service.
-- Optional: the NVIDIA driver (NVML) for the GPU columns, and access to the docker socket for
-  container names.
+- Optional: a GPU for the GPU columns (NVIDIA through NVML; AMD, Intel and other DRM drivers through fdinfo), and access to the docker socket for container names.
 
 Developed and tested on an Arch-based KDE Plasma desktop with an NVIDIA GPU.
 
@@ -95,7 +94,7 @@ Sort column, direction, view mode and the details panel are remembered in
 | Cache | file cache from `memory.stat` | not shown |
 | CPU% | `cpu.stat` (includes exited children); 100% = one core | per-process CPU time |
 | Pressure | `memory.pressure` some avg10 | not available |
-| GPU% / VRAM | NVML, summed over the program's processes | same |
+| GPU% / VRAM | NVIDIA: NVML. AMD, Intel and other DRM drivers: `/proc/<pid>/fdinfo` (`drm-resident-vram` + `drm-resident-gtt`, busy time of the busiest engine) and sysfs for the device totals. Summed over the program's processes | same |
 | Disk/s | `/proc/<pid>/io` read and write bytes, own processes only | same |
 
 The cgroup totals include kernel memory and exited children, which no single process accounts

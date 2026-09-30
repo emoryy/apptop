@@ -1187,7 +1187,17 @@ impl App {
         ];
         if self.gpu {
             stats.push(("   GPU ".into(), label));
-            stats.push((format!("{:.0}%, {}", n.gpu, fmt_bytes(n.vram)), bg));
+            let mem = if n.gtt > 0 {
+                format!(
+                    "{} (VRAM {} + GTT {})",
+                    fmt_bytes(n.vram),
+                    fmt_bytes(n.vram - n.gtt),
+                    fmt_bytes(n.gtt)
+                )
+            } else {
+                fmt_bytes(n.vram)
+            };
+            stats.push((format!("{:.0}%, {mem}", n.gpu), bg));
         }
         if let Some(p) = n.psi {
             stats.push((tr("   pressure ", "   nyomás ").into(), label));
@@ -1442,7 +1452,8 @@ fn share_totals(m: &Model) -> Totals {
     Totals {
         mem: s.mem_total as f64,
         swap: s.swap_total as f64,
-        vram: s.gpu.as_ref().map(|g| g.total as f64).unwrap_or(0.0),
+        // the VRAM column includes GTT, so its share is of both pools
+        vram: s.gpu.as_ref().map(|g| (g.total + g.gtt_total) as f64).unwrap_or(0.0),
         cpu: s.ncpu as f64 * 100.0,
         io: m.roots.iter().map(|r| r.io_read + r.io_write).sum(),
         procs: m.roots.iter().map(|r| r.procs).sum::<usize>() as f64,
@@ -1669,7 +1680,17 @@ fn draw_summary(s: &Summary, interval: Duration, area: Rect, buf: &mut Buffer) {
         meters.push((
             "VRAM",
             g.used as f64 / g.total.max(1) as f64,
-            format!("{:>5}/{} GPU {:>3}%", fmt_bytes(g.used), fmt_bytes(g.total), g.util),
+            if g.gtt_used > 0 {
+                format!(
+                    "{:>5}/{} GTT {:>5} GPU {:>3}%",
+                    fmt_bytes(g.used),
+                    fmt_bytes(g.total),
+                    fmt_bytes(g.gtt_used),
+                    g.util
+                )
+            } else {
+                format!("{:>5}/{} GPU {:>3}%", fmt_bytes(g.used), fmt_bytes(g.total), g.util)
+            },
         ));
     }
     let tail = format!("{:.0} {}", interval.as_secs_f64(), tr("s", "mp"));
@@ -1739,6 +1760,10 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
                 "az idő hány %-ában várt a program memóriára (PSI, 10 mp átlag)",
             ),
             ("CPU% / GPU%", "100% = egy teljes CPU mag / a teljes GPU"),
+            (
+                "VRAM",
+                "GPU-memória; AMD/Intel GPU-n VRAM + GTT (a GPU-nak leképezett RAM)",
+            ),
             ("Lemez/s", "olvasás + írás a lemezre (csak saját folyamatok)"),
             ("Cache", "fájl cache, szükség esetén felszabadul"),
             (
@@ -1785,6 +1810,10 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
                 "% of time the program waited for memory (PSI, 10 s average)",
             ),
             ("CPU% / GPU%", "100% = one whole CPU core / the whole GPU"),
+            (
+                "VRAM",
+                "GPU memory; on AMD/Intel GPUs VRAM + GTT (system RAM mapped for the GPU)",
+            ),
             ("Disk/s", "disk reads + writes (own processes only)"),
             ("Cache", "file cache, freed when memory is needed"),
             (

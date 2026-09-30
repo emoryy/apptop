@@ -72,7 +72,7 @@ impl Sampler {
             desktop: &self.desktop,
             unit_desc: &mut self.unit_desc,
             docker: &mut self.docker,
-            gpu: self.gpu.sample(),
+            gpu: self.gpu.sample(&cur.procs),
             clk_tck: self.clk_tck,
             split_terminals: self.split_terminals,
         });
@@ -133,6 +133,9 @@ fn parse_args() -> Result<Args> {
 }
 
 fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, which turns `apptop --dump | head` into a panic; die quietly like other CLI tools
+    // SAFETY: resetting a signal disposition before any threads exist.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let args = parse_args()?;
     i18n::set(args.lang.unwrap_or_else(i18n::from_env));
     let mut cfg = config::Config::load();
