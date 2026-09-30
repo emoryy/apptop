@@ -425,8 +425,7 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
         let id = names::app_unit_desktop_id(&u.name);
         // a login session may contain a terminal, but it is a container of its own (session_breakdown)
         u.terminal = !u.name.starts_with("session-")
-            && (u.name.starts_with("vte-spawn-")
-                || u.name.starts_with("ptyxis-spawn-")
+            && (is_tab_scope(&u.name)
                 || id.as_deref().is_some_and(|i| TERMINAL_IDS.contains(&i))
                 || u.pids.iter().any(|pid| names::is_terminal(&cur.procs[pid])));
     }
@@ -475,7 +474,55 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
         }
         units.get_mut(&tu).unwrap().pids.retain(|p| !moved.contains(p));
     }
+
+    // GNOME Terminal, Ptyxis and kitty put every tab's shell in a scope of its own. Those shells
+    // belong to the terminal that spawned them, wherever it runs (app scope, login session).
+    let spawn_units: Vec<String> = units
+        .values()
+        .filter(|u| is_tab_scope(&u.name))
+        .map(|u| u.path.clone())
+        .collect();
+    for su in spawn_units {
+        let pids = units[&su].pids.clone();
+        let in_unit: HashSet<u32> = pids.iter().copied().collect();
+        let owner = pids
+            .iter()
+            .filter_map(|p| cur.procs.get(p))
+            .filter(|p| !in_unit.contains(&p.ppid))
+            .find_map(|p| unit_of.get(&p.ppid).filter(|pu| **pu != su).cloned());
+        let Some(owner) = owner else { continue };
+        for &x in &pids {
+            let q = &cur.procs[&x];
+            let (mem, swap, cpu) = ((q.anon + q.shmem) as i64, q.swap as i64, acc.proc_cpu[&x]);
+            let to = units.get_mut(&owner).unwrap();
+            to.pids.push(x);
+            to.moved_in.push(x);
+            to.moved_mem += mem;
+            to.moved_swap += swap;
+            to.moved_cpu += cpu;
+        }
+        units.get_mut(&su).unwrap().pids.clear();
+    }
     units
+}
+
+fn is_tab_scope(unit: &str) -> bool {
+    let Some(base) = unit.strip_suffix(".scope") else {
+        return false;
+    };
+    if base.starts_with("vte-spawn-") || base.starts_with("ptyxis-spawn-") {
+        return true;
+    }
+    // kitty-<kitty pid>-<n>
+    let mut parts = base.split('-');
+    parts.next() == Some("kitty")
+        && parts
+            .next()
+            .is_some_and(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+        && parts
+            .next()
+            .is_some_and(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+        && parts.next().is_none()
 }
 
 /// Values of a whole unit: from its cgroup when there is one, else summed over its processes.
@@ -1328,6 +1375,15 @@ mod tests {
         assert_eq!(service_name("plasma-kwin_wayland.service"), "kwin_wayland");
         assert_eq!(service_name("app-foo@3b3ffbc8999742bd9e7534c07f7de661.service"), "foo");
         assert_eq!(service_name("getty@tty1.service"), "getty@tty1");
+    }
+
+    #[test]
+    fn recognizes_terminal_tab_scopes() {
+        assert!(is_tab_scope("vte-spawn-3f2a.scope"));
+        assert!(is_tab_scope("ptyxis-spawn-b5b4.scope"));
+        assert!(is_tab_scope("kitty-41394-0.scope"));
+        assert!(!is_tab_scope("kitty-child.scope"));
+        assert!(!is_tab_scope("app-kitty-123.scope"));
     }
 
     #[test]
