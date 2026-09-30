@@ -420,9 +420,11 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
     }
     for u in units.values_mut() {
         let id = names::app_unit_desktop_id(&u.name);
-        u.terminal = u.name.starts_with("vte-spawn-")
-            || id.as_deref().is_some_and(|i| TERMINAL_IDS.contains(&i))
-            || u.pids.iter().any(|pid| names::is_terminal(&cur.procs[pid]));
+        // a login session may contain a terminal, but it is a container of its own (session_breakdown)
+        u.terminal = !u.name.starts_with("session-")
+            && (u.name.starts_with("vte-spawn-")
+                || id.as_deref().is_some_and(|i| TERMINAL_IDS.contains(&i))
+                || u.pids.iter().any(|pid| names::is_terminal(&cur.procs[pid])));
     }
 
     // A program started from a terminal may move its main process into its own scope
