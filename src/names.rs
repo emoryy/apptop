@@ -519,8 +519,6 @@ fn expand_specifiers(desc: &str, unit: &str) -> String {
     out
 }
 
-/// A logind session scope (`session-12.scope`) described from /run/systemd/sessions:
-/// graphical, SSH or console, plus tty / remote host.
 /// Name of a desktop session entry (wayland-sessions / xsessions), e.g. "hyprland" -> "Hyprland".
 pub fn session_desktop_name(id: &str) -> Option<String> {
     [
@@ -533,6 +531,8 @@ pub fn session_desktop_name(id: &str) -> Option<String> {
     .and_then(|t| parse_desktop(&t).0)
 }
 
+/// A logind session scope (`session-12.scope`) described from /run/systemd/sessions:
+/// graphical, SSH or console, plus tty / remote host.
 pub fn login_session(unit: &str) -> Option<(String, String, bool)> {
     let id = unit.strip_prefix("session-")?.strip_suffix(".scope")?;
     let text = fs::read_to_string(format!("/run/systemd/sessions/{id}")).ok()?;

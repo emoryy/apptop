@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -103,25 +103,29 @@ impl Gpu {
 
 struct DrmCard {
     dir: PathBuf,
+    /// PCI address, matched against fdinfo drm-pdev
+    pdev: String,
 }
 
 /// Non-NVIDIA GPUs (amdgpu, i915, xe, ...): device totals from sysfs, per-process use from
 /// the DRM fdinfo keys every modern driver exposes (drm-resident-*, drm-engine-*).
 struct Drm {
     cards: Vec<DrmCard>,
-    /// (pid, start time) -> (fds pointing at /dev/dri, sample number of the scan)
+    /// (pid, start time) -> (fds pointing at /dev/dri, sample number of the first sighting)
     fds: HashMap<(u32, u64), (Vec<String>, u64)>,
-    /// (pid, pdev, client id, engine) -> (busy ns or cycles, total cycles) at the previous sample
     prev_busy: BusyCounters,
     prev_at: Option<Instant>,
     sample_no: u64,
 }
 
-/// (pid, pdev, client id, engine) -> (busy ns or cycles, total cycles)
+/// (pid, pdev, client id, engine key) -> (busy ns or cycles, total cycles) at the previous sample
 type BusyCounters = HashMap<(u32, String, u64, String), (u64, Option<u64>)>;
 
 /// Listing a process's fds is the expensive part; the result is reused for this many samples.
 const FD_RESCAN: u64 = 15;
+/// For this many samples after a process appears, it is checked for a GPU fd more often,
+/// since programs open the render node some time after they start.
+const YOUNG: u64 = 10;
 
 impl Drm {
     fn new() -> Self {
@@ -145,7 +149,11 @@ impl Drm {
                 if driver.is_empty() || driver.starts_with("nvidia") {
                     continue;
                 }
-                cards.push(DrmCard { dir: dev });
+                let pdev = fs::read_link(&dev)
+                    .ok()
+                    .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+                    .unwrap_or_default();
+                cards.push(DrmCard { dir: dev, pdev });
             }
         }
         Drm {
@@ -164,16 +172,14 @@ impl Drm {
         self.sample_no += 1;
         let read_u64 = |p: PathBuf| fs::read_to_string(p).ok().and_then(|v| v.trim().parse::<u64>().ok());
         let mut have_busy = false;
-        let mut sysfs_gtt = false;
+        // cards whose driver counts its GTT pool in sysfs; for the others the clients are summed
+        let mut sysfs_gtt: HashSet<String> = HashSet::new();
         for c in &self.cards {
             s.used += read_u64(c.dir.join("mem_info_vram_used")).unwrap_or(0);
             s.total += read_u64(c.dir.join("mem_info_vram_total")).unwrap_or(0);
-            match read_u64(c.dir.join("mem_info_gtt_used")) {
-                Some(g) => {
-                    s.gtt_used += g;
-                    sysfs_gtt = true;
-                }
-                None => s.gtt_unbounded = true,
+            if let Some(g) = read_u64(c.dir.join("mem_info_gtt_used")) {
+                s.gtt_used += g;
+                sysfs_gtt.insert(c.pdev.clone());
             }
             s.gtt_total += read_u64(c.dir.join("mem_info_gtt_total")).unwrap_or(0);
             if let Some(b) = read_u64(c.dir.join("gpu_busy_percent")) {
@@ -189,25 +195,26 @@ impl Drm {
             .unwrap_or(0.0);
         self.prev_at = Some(now);
         let mut busy_now: BusyCounters = HashMap::new();
-        // device load per engine, summed over clients; the busiest engine is the device's load
-        let mut engine_load: HashMap<(String, String), f64> = HashMap::new();
-        let mut drm_gtt = 0u64;
+        // one entry per DRM client, however many processes share its fd
+        let mut client_load: HashMap<(String, u64, String), f64> = HashMap::new();
+        let mut client_gtt: HashMap<(String, u64), u64> = HashMap::new();
         self.fds
             .retain(|(pid, st), _| procs.get(pid).is_some_and(|p| p.start_time == *st));
 
         // /proc/<pid>/io is readable exactly for the processes whose fdinfo is readable too
         for p in procs.values().filter(|p| p.io.is_some()) {
             let key = (p.pid, p.start_time);
-            // rescans are spread over the interval by pid, and processes without a GPU fd yet are
-            // looked at more often, since a program opens the render node some time after it starts
+            // rescans are spread over the interval by pid
             let phase = self.sample_no + p.pid as u64;
             let stale = match self.fds.get(&key) {
                 None => true,
-                Some((fds, _)) if fds.is_empty() => phase % 3 == 0,
+                Some((fds, first)) if fds.is_empty() && self.sample_no - first < YOUNG => phase % 2 == 0,
+                Some((fds, _)) if fds.is_empty() => phase % (FD_RESCAN * 2) == 0,
                 Some(_) => phase % FD_RESCAN == 0,
             };
             if stale {
-                self.fds.insert(key, (drm_fds(p.pid), self.sample_no));
+                let first = self.fds.get(&key).map_or(self.sample_no, |(_, f)| *f);
+                self.fds.insert(key, (drm_fds(p.pid), first));
             }
             let fds = &self.fds[&key].0;
             if fds.is_empty() {
@@ -224,8 +231,12 @@ impl Drm {
             for ((pdev, id), c) in clients {
                 mem += c.vram + c.gtt;
                 gtt += c.gtt;
+                if !sysfs_gtt.contains(&pdev) {
+                    // buffers shared with other processes (a compositor's imported windows) once
+                    client_gtt.insert((pdev.clone(), id), c.gtt.saturating_sub(c.gtt_shared));
+                }
                 for e in c.engines {
-                    let k = (p.pid, pdev.clone(), id, e.name.clone());
+                    let k = (p.pid, pdev.clone(), id, e.key.clone());
                     if let Some(&(prev, prev_total)) = self.prev_busy.get(&k) {
                         let busy = e.busy.saturating_sub(prev) as f64;
                         // cycles (xe) are measured against the engine's own total; ns against wall time
@@ -236,7 +247,7 @@ impl Drm {
                         if span > 0.0 {
                             let u = busy / (span * e.capacity.max(1) as f64) * 100.0;
                             util = util.max(u);
-                            *engine_load.entry((pdev.clone(), e.name.clone())).or_default() += u;
+                            client_load.insert((pdev.clone(), id, e.key.clone()), u);
                         }
                     }
                     busy_now.insert(k, (e.busy, e.total));
@@ -245,7 +256,6 @@ impl Drm {
             if mem > 0 {
                 *s.per_pid.entry(p.pid).or_default() += mem;
                 *s.gtt_per_pid.entry(p.pid).or_default() += gtt;
-                drm_gtt += gtt;
             }
             if util >= 0.5 {
                 *s.util_per_pid.entry(p.pid).or_default() += util.min(100.0).round() as u32;
@@ -254,12 +264,18 @@ impl Drm {
         self.prev_busy = busy_now;
         if !have_busy {
             // i915/xe have no device-wide busy file: the clients' load on the busiest engine stands in
+            let mut engine_load: HashMap<(String, String), f64> = HashMap::new();
+            for ((pdev, _, engine), u) in client_load {
+                *engine_load.entry((pdev, engine)).or_default() += u;
+            }
             let load = engine_load.values().fold(0.0f64, |a, b| a.max(*b)).min(100.0);
             s.util = s.util.max(load.round() as u32);
         }
-        if !sysfs_gtt {
-            // no pool counter in sysfs: what the visible clients have mapped (also next to NVIDIA)
-            s.gtt_used += drm_gtt;
+        let fallback: u64 = client_gtt.values().sum();
+        if fallback > 0 {
+            // mapped system memory of a GPU without a pool counter: its size is bounded only by RAM
+            s.gtt_used += fallback;
+            s.gtt_unbounded = true;
         }
     }
 }
@@ -275,7 +291,8 @@ fn drm_fds(pid: u32) -> Vec<String> {
 }
 
 struct Engine {
-    name: String,
+    /// "ns:<engine>" or "cycles:<engine>", so drivers reporting both never mix the two
+    key: String,
     /// busy ns (drm-engine-*) or busy cycles (drm-cycles-*, xe)
     busy: u64,
     /// total cycles for cycle counters (drm-total-cycles-*)
@@ -288,6 +305,8 @@ struct Client {
     id: u64,
     vram: u64,
     gtt: u64,
+    /// the part of `gtt` shared with other clients
+    gtt_shared: u64,
     engines: Vec<Engine>,
 }
 
@@ -304,7 +323,18 @@ fn parse_size(v: &str) -> u64 {
 }
 
 fn read_client(pid: u32, fd: &str) -> Option<Client> {
-    let text = fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).ok()?;
+    parse_client(&fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).ok()?)
+}
+
+fn is_vram_region(r: &str) -> bool {
+    r.starts_with("vram") || r.starts_with("local")
+}
+
+fn is_system_region(r: &str) -> bool {
+    r == "gtt" || r.starts_with("system") || r.starts_with("stolen")
+}
+
+fn parse_client(text: &str) -> Option<Client> {
     let mut kv: HashMap<&str, &str> = HashMap::new();
     for line in text.lines() {
         if let Some((k, v)) = line.split_once(':') {
@@ -317,7 +347,7 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
     }
     // newer drivers report drm-resident-<region>, older ones drm-memory-<region>; region names
     // differ per driver: amdgpu vram/gtt, i915/xe local0 (device memory) and system0/stolen-*
-    let (mut vram, mut gtt) = (0, 0);
+    let (mut vram, mut gtt, mut gtt_shared) = (0, 0, 0);
     let resident: Vec<(&str, &str)> = kv
         .iter()
         .filter_map(|(k, v)| k.strip_prefix("drm-resident-").map(|r| (r, *v)))
@@ -330,10 +360,17 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
         resident
     };
     for (r, v) in regions {
-        if r == "vram" || r.starts_with("local") || r.starts_with("vram") {
+        if is_vram_region(r) {
             vram += parse_size(v);
-        } else if r == "gtt" || r.starts_with("system") || r.starts_with("stolen") {
+        } else if is_system_region(r) {
             gtt += parse_size(v);
+        }
+    }
+    for (k, v) in &kv {
+        if let Some(r) = k.strip_prefix("drm-shared-")
+            && is_system_region(r)
+        {
+            gtt_shared += parse_size(v);
         }
     }
     let num = |v: &str| {
@@ -353,17 +390,19 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
             && !name.starts_with("capacity-")
         {
             engines.push(Engine {
-                name: name.to_string(),
+                key: format!("ns:{name}"),
                 busy: num(v),
                 total: None,
                 capacity: capacity(name),
             });
-        } else if let Some(name) = k.strip_prefix("drm-cycles-") {
-            let total = kv.get(format!("drm-total-cycles-{name}").as_str()).map(|t| num(t));
+        } else if let Some(name) = k.strip_prefix("drm-cycles-")
+            // cycles mean nothing without the matching total (msm and panfrost report a clock instead)
+            && let Some(total) = kv.get(format!("drm-total-cycles-{name}").as_str())
+        {
             engines.push(Engine {
-                name: name.to_string(),
+                key: format!("cycles:{name}"),
                 busy: num(v),
-                total,
+                total: Some(num(total)),
                 capacity: capacity(name),
             });
         }
@@ -373,6 +412,7 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
         id: kv.get("drm-client-id").and_then(|v| v.parse().ok()).unwrap_or(0),
         vram,
         gtt,
+        gtt_shared,
         engines,
     })
 }
@@ -380,6 +420,32 @@ fn read_client(pid: u32, fd: &str) -> Option<Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn i915_regions_and_shared_part() {
+        let c = parse_client(
+            "drm-driver:\ti915\ndrm-client-id:\t8\ndrm-pdev:\t0000:00:02.0\ndrm-total-system0:\t13076 KiB\n\
+             drm-resident-system0:\t13076 KiB\ndrm-shared-system0:\t4000 KiB\ndrm-resident-stolen-system0:\t0\n\
+             drm-engine-render:\t224515 ns\n",
+        )
+        .unwrap();
+        assert_eq!((c.vram, c.gtt, c.gtt_shared), (0, 13076 << 10, 4000 << 10));
+        assert_eq!(c.engines.len(), 1);
+    }
+
+    #[test]
+    fn cycles_need_a_total_and_never_share_a_key_with_ns() {
+        // msm style: ns and cycles for the same engine, no total cycles
+        let msm = parse_client("drm-driver:\tmsm\ndrm-engine-gpu:\t100 ns\ndrm-cycles-gpu:\t5000\n").unwrap();
+        assert_eq!(
+            msm.engines.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+            ["ns:gpu"]
+        );
+        // xe style
+        let xe = parse_client("drm-driver:\txe\ndrm-cycles-rcs:\t50\ndrm-total-cycles-rcs:\t100\n").unwrap();
+        assert_eq!(xe.engines[0].key, "cycles:rcs");
+        assert_eq!(xe.engines[0].total, Some(100));
+    }
 
     #[test]
     fn parses_fdinfo_sizes() {

@@ -432,7 +432,9 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
         u.terminal = !u.name.starts_with("session-")
             && !u.name.starts_with("wayland-wm@")
             && (is_tab_scope(&u.name)
-                || id.as_deref().is_some_and(|i| TERMINAL_IDS.contains(&i))
+                || id.as_deref().is_some_and(|i| {
+                    TERMINAL_IDS.contains(&i) || i.split_once('-').is_some_and(|(_, rest)| TERMINAL_IDS.contains(&rest))
+                })
                 || u.pids.iter().any(|pid| names::is_terminal(&cur.procs[pid])));
     }
 
@@ -664,6 +666,27 @@ fn unit_items(
             Some(p) => (format!("Docker: {p}"), Kind::Docker),
             None => (cname, Kind::Docker),
         }
+    // session containers first: a browser or a terminal running in one does not make it one
+    } else if let Some((name, detail, graphical)) = names::login_session(&u.name) {
+        instance = detail.clone();
+        node.detail = detail;
+        // `startx` from a console login keeps TYPE=tty, but a desktop runs in it all the same
+        let desktop = graphical
+            || procs.iter().any(|p| {
+                names::is_terminal(p) || matches!(names::exe_basename(p).as_str(), "Xorg" | "X" | "Xwayland" | "xinit")
+            });
+        (name, if desktop { Kind::Session } else { Kind::SystemService })
+    } else if let Some(wm) = names::unescape_unit(&u.name)
+        .strip_prefix("wayland-wm@")
+        .and_then(|r| r.strip_suffix(".service"))
+    {
+        // uwsm runs the compositor as a user service; programs started without `uwsm app` land here
+        let id = wm.strip_suffix(".desktop").unwrap_or(wm);
+        let wm_name = names::session_desktop_name(id).unwrap_or_else(|| id.to_string());
+        // the compositor process gets a row of its own under this name, so the container needs another
+        node.detail = format!("{wm_name} · uwsm");
+        instance = node.detail.clone();
+        (tr("desktop session", "grafikus munkamenet").to_string(), Kind::Session)
     } else if u.terminal {
         // GNOME Terminal and Ptyxis run each tab in a scope of its own; name it after the terminal
         // that owns the shell so the tabs join the terminal's row
@@ -738,26 +761,6 @@ fn unit_items(
             .or_else(|| main.map(names::process_name))
             .unwrap_or_else(|| service_name(&u.name));
         (name, Kind::App)
-    } else if let Some((name, detail, graphical)) = names::login_session(&u.name) {
-        instance = detail.clone();
-        node.detail = detail;
-        // `startx` from a console login keeps TYPE=tty, but a desktop runs in it all the same
-        let desktop = graphical
-            || procs.iter().any(|p| {
-                names::is_terminal(p) || matches!(names::exe_basename(p).as_str(), "Xorg" | "X" | "Xwayland" | "xinit")
-            });
-        (name, if desktop { Kind::Session } else { Kind::SystemService })
-    } else if let Some(wm) = names::unescape_unit(&u.name)
-        .strip_prefix("wayland-wm@")
-        .and_then(|r| r.strip_suffix(".service"))
-    {
-        // uwsm runs the compositor as a user service; programs started without `uwsm app` land here
-        let id = wm.strip_suffix(".desktop").unwrap_or(wm);
-        let wm_name = names::session_desktop_name(id).unwrap_or_else(|| id.to_string());
-        // the compositor process gets a row of its own under this name, so the container needs another
-        node.detail = format!("{wm_name} · uwsm");
-        instance = node.detail.clone();
-        (tr("desktop session", "grafikus munkamenet").to_string(), Kind::Session)
     } else if u.name == "init.scope" {
         (
             if is_user {
@@ -826,13 +829,6 @@ fn unit_items(
         Kind::Kernel => label_rows(&procs, acc, |p| {
             p.comm.split(['/', ':', '-']).next().unwrap_or(&p.comm).to_string()
         }),
-        Kind::Browser => label_rows(&procs, acc, |p| {
-            if names::CHROMIUM_FAMILY.contains(&names::exe_basename(p).as_str()) {
-                chromium_label(p)
-            } else {
-                generic_label(p)
-            }
-        }),
         // Chromium-family processes keep their roles wherever they run (Flatpak, apps built on it)
         _ => label_rows(&procs, acc, |p| {
             if names::CHROMIUM_FAMILY.contains(&names::exe_basename(p).as_str()) {
@@ -842,7 +838,8 @@ fn unit_items(
             }
         }),
     };
-    if rows.len() > 1 || rows.iter().any(|r| !r.children.is_empty()) || kind == Kind::Terminal {
+    if rows.len() > 1 || rows.iter().any(|r| !r.children.is_empty()) || kind == Kind::Terminal || profile_key.is_some()
+    {
         if node.cache.is_some() {
             push_rest(&node, &mut rows, u.stat.as_ref());
         }
