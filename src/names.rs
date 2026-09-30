@@ -215,6 +215,8 @@ const TERMINALS: &[&str] = &[
     "kgx",
     "ptyxis",
     "ptyxis-agent",
+    // kitty's own helpers (__atexit__, __watch_conf__, run-shell)
+    "kitten",
 ];
 pub const CHROMIUM_FAMILY: &[&str] = &[
     "vivaldi-bin",
