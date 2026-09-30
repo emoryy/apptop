@@ -224,6 +224,9 @@ const TERMINAL_IDS: &[&str] = &[
     "kitty",
     "Alacritty",
     "foot",
+    "org.gnome.Console",
+    "org.gnome.Ptyxis",
+    "org.gnome.Terminal",
 ];
 
 struct Acc<'a> {
@@ -423,6 +426,7 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
         // a login session may contain a terminal, but it is a container of its own (session_breakdown)
         u.terminal = !u.name.starts_with("session-")
             && (u.name.starts_with("vte-spawn-")
+                || u.name.starts_with("ptyxis-spawn-")
                 || id.as_deref().is_some_and(|i| TERMINAL_IDS.contains(&i))
                 || u.pids.iter().any(|pid| names::is_terminal(&cur.procs[pid])));
     }
@@ -581,10 +585,40 @@ fn unit_items(
             None => (cname, Kind::Docker),
         }
     } else if u.terminal {
-        let name = desktop_name
+        // GNOME Terminal and Ptyxis run each tab in a scope of its own; name it after the terminal
+        // that owns the shell so the tabs join the terminal's row
+        let owner = main
+            .and_then(|m| cur.procs.get(&m.ppid))
+            .filter(|_| u.name.starts_with("vte-spawn-") || u.name.starts_with("ptyxis-spawn-"))
+            .and_then(|o| {
+                let exe = names::exe_basename(o);
+                let id = match exe.as_str() {
+                    "gnome-terminal-server" => Some("org.gnome.Terminal"),
+                    "ptyxis" | "ptyxis-agent" => Some("org.gnome.Ptyxis"),
+                    "kgx" => Some("org.gnome.Console"),
+                    _ => None,
+                };
+                id.and_then(|i| ctx.desktop.by_id(i))
+                    .or_else(|| ctx.desktop.by_exe(&exe))
+                    .map(String::from)
+            });
+        let name = owner
+            .or(desktop_name)
             .or(by_exe)
             .unwrap_or_else(|| tr("terminal", "terminál").into());
+        // all windows and tabs of one terminal program make one row
+        profile_key = Some(format!("terminal\t{name}"));
         (name, Kind::Terminal)
+    } else if let Some(app_id) = unit_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("flatpak-"))
+        .filter(|_| names::unescape_unit(&u.name).starts_with("app-flatpak-"))
+    {
+        // Flatpak starts sandboxed helpers (zypak, flatpak-spawn --sandbox) in scopes of their own:
+        // all scopes of one app id make one row, marked so it does not merge with a native install
+        let base = desktop_name.clone().unwrap_or_else(|| app_id.to_string());
+        profile_key = Some(format!("flatpak\t{app_id}"));
+        (format!("{base} (Flatpak)"), Kind::App)
     } else if let Some(key) = browser_profile_key(&procs, cur) {
         if let Some(n) = &desktop_name {
             let e = profile_names.entry(key.clone()).or_insert_with(|| (n.clone(), true));
@@ -833,9 +867,13 @@ fn group_node(name: String, mut items: Vec<Item>) -> Node {
     for it in &items {
         node.add_values(&it.node);
     }
+    if items.iter().all(|i| i.profile_key.is_some()) {
+        // cgroups of one browser profile, one Flatpak app or one terminal program: one combined breakdown
+        node.children = merge_same(items.into_iter().flat_map(|i| i.node.children).collect());
+        return node;
+    }
     match kind {
         Kind::Browser => {
-            // several cgroups of one browser profile: one combined breakdown
             node.children = merge_same(items.into_iter().flat_map(|i| i.node.children).collect());
         }
         Kind::Job => {
@@ -922,7 +960,13 @@ fn subtree_mem(pid: u32, set: &HashSet<u32>, acc: &Acc) -> u64 {
 }
 
 fn instance_label(p: &Proc) -> String {
-    let args: Vec<&str> = p.cmdline.iter().skip(1).map(String::as_str).collect();
+    // a Flatpak sandbox: "bwrap --args 76 -- firefox ..." is about what comes after "--"
+    let skip = if names::exe_basename(p) == "bwrap" {
+        p.cmdline.iter().position(|a| a == "--").map_or(1, |i| i + 1)
+    } else {
+        1
+    };
+    let args: Vec<&str> = p.cmdline.iter().skip(skip).map(String::as_str).collect();
     let s = if args.is_empty() {
         p.cwd.as_deref().map(names::tilde).unwrap_or_default()
     } else {

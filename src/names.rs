@@ -212,6 +212,9 @@ const TERMINALS: &[&str] = &[
     "tilix",
     "terminator",
     "ghostty",
+    "kgx",
+    "ptyxis",
+    "ptyxis-agent",
 ];
 pub const CHROMIUM_FAMILY: &[&str] = &[
     "vivaldi-bin",
