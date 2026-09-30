@@ -546,8 +546,15 @@ fn unit_items(
     let procs: Vec<&Proc> = u.pids.iter().map(|pid| &cur.procs[pid]).collect();
     let set: HashSet<u32> = u.pids.iter().copied().collect();
     let main = main_process(&procs, &set, acc);
-    let desktop_name = names::app_unit_desktop_id(&u.name)
-        .and_then(|id| ctx.desktop.by_id(&id))
+    let unit_id = names::app_unit_desktop_id(&u.name);
+    // GNOME, Flatpak and uwsm put the launcher first: app-gnome-<id>-<pid>.scope, app-flatpak-<id>-...
+    let desktop_name = unit_id
+        .as_deref()
+        .and_then(|id| {
+            ctx.desktop
+                .by_id(id)
+                .or_else(|| id.split_once('-').and_then(|(_, rest)| ctx.desktop.by_id(rest)))
+        })
         .map(String::from);
     let by_exe = main
         .and_then(|m| ctx.desktop.by_exe(&names::exe_basename(m)))
@@ -609,8 +616,11 @@ fn unit_items(
         profile_key = Some(key);
         (fallback, Kind::Browser)
     } else if is_app {
+        // a D-Bus activated service without a desktop entry is best known by its bus name
+        let bus_name = unit_id.filter(|_| names::unescape_unit(&u.name).starts_with("app-dbus-"));
         let name = desktop_name
             .or(by_exe)
+            .or(bus_name)
             .or_else(|| main.map(names::process_name))
             .unwrap_or_else(|| service_name(&u.name));
         (name, Kind::App)
@@ -628,12 +638,21 @@ fn unit_items(
             Kind::SystemService,
         )
     } else {
-        node.detail = ctx
+        let desc = ctx
             .unit_desc
             .get(&u.name, is_user && u.path.contains("/user@"))
             .unwrap_or_default();
+        let unit = service_name(&u.name);
+        // "org.gnome.SettingsDaemon.Power" says less than its "GNOME power management service"
+        let reverse_dns = unit.split('@').next().is_some_and(|b| b.matches('.').count() >= 2);
+        let (name, detail) = if reverse_dns && !desc.is_empty() {
+            (desc, unit)
+        } else {
+            (unit, desc)
+        };
+        node.detail = detail;
         (
-            service_name(&u.name),
+            name,
             if is_user {
                 Kind::UserService
             } else {
