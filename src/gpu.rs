@@ -208,9 +208,9 @@ impl Drm {
             let phase = self.sample_no + p.pid as u64;
             let stale = match self.fds.get(&key) {
                 None => true,
-                Some((fds, first)) if fds.is_empty() && self.sample_no - first < YOUNG => phase % 2 == 0,
-                Some((fds, _)) if fds.is_empty() => phase % (FD_RESCAN * 2) == 0,
-                Some(_) => phase % FD_RESCAN == 0,
+                Some((fds, first)) if fds.is_empty() && self.sample_no - first < YOUNG => phase.is_multiple_of(2),
+                Some((fds, _)) if fds.is_empty() => phase.is_multiple_of(FD_RESCAN * 2),
+                Some(_) => phase.is_multiple_of(FD_RESCAN),
             };
             if stale {
                 let first = self.fds.get(&key).map_or(self.sample_no, |(_, f)| *f);
