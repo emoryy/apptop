@@ -40,11 +40,23 @@ Developed and tested on an Arch-based KDE Plasma desktop with an NVIDIA GPU.
 
 ## Install
 
+**Arch Linux:** build a package with the PKGBUILD in `packaging/arch` (it builds the current GitHub `master`):
+
+```bash
+git clone https://github.com/emoryy/apptop
+cd apptop/packaging/arch
+makepkg -si
+```
+
+This installs `/usr/bin/apptop` and a menu entry that opens it in your terminal.
+
+**Any distribution, with Cargo:**
+
 ```bash
 cargo install --git https://github.com/emoryy/apptop
 ```
 
-or from a checkout:
+The binary lands in `~/.cargo/bin`, which has to be on `PATH`. Or build from a checkout and copy it wherever you like:
 
 ```bash
 cargo build --release
