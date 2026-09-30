@@ -185,7 +185,12 @@ fn unit_path(cg: &str) -> String {
     let parts: Vec<&str> = cg.split('/').collect();
     for (i, c) in parts.iter().enumerate() {
         let is_user_manager = c.starts_with("user@") && c.ends_with(".service");
-        let is_app_slice = c.starts_with("app-") && c.ends_with(".slice") && i > 0 && parts[i - 1] == "app.slice";
+        // uwsm groups its app scopes in app-graphical.slice (and background-/session-graphical.slice)
+        let is_app_slice = c.starts_with("app-")
+            && c.ends_with(".slice")
+            && !c.ends_with("-graphical.slice")
+            && i > 0
+            && parts[i - 1] == "app.slice";
         if (c.ends_with(".service") || c.ends_with(".scope")) && !is_user_manager || is_app_slice {
             return parts[..=i].join("/");
         }
@@ -425,6 +430,7 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
         let id = names::app_unit_desktop_id(&u.name);
         // a login session may contain a terminal, but it is a container of its own (session_breakdown)
         u.terminal = !u.name.starts_with("session-")
+            && !u.name.starts_with("wayland-wm@")
             && (is_tab_scope(&u.name)
                 || id.as_deref().is_some_and(|i| TERMINAL_IDS.contains(&i))
                 || u.pids.iter().any(|pid| names::is_terminal(&cur.procs[pid])));
@@ -447,7 +453,19 @@ fn collect_units(ctx: &Ctx, acc: &Acc) -> BTreeMap<String, Unit> {
             let Some(pu) = unit_of.get(&parent.pid).cloned() else {
                 continue;
             };
-            if pu == tu || units[&pu].terminal || parent.pid == 1 || parent.comm == "systemd" {
+            // not the terminal itself (a terminal started by a compositor keeps its own scope), and never
+            // into a session container, which holds everything started from the desktop anyway
+            let into_session = pu
+                .rsplit('/')
+                .next()
+                .is_some_and(|n| n.starts_with("session-") || n.starts_with("wayland-wm@"));
+            if pu == tu
+                || units[&pu].terminal
+                || parent.pid == 1
+                || parent.comm == "systemd"
+                || names::is_terminal(p)
+                || into_session
+            {
                 continue;
             }
             let mut stack = vec![pid];
@@ -709,6 +727,17 @@ fn unit_items(
         instance = detail.clone();
         node.detail = detail;
         (name, if graphical { Kind::Session } else { Kind::SystemService })
+    } else if let Some(wm) = names::unescape_unit(&u.name)
+        .strip_prefix("wayland-wm@")
+        .and_then(|r| r.strip_suffix(".service"))
+    {
+        // uwsm runs the compositor as a user service; programs started without `uwsm app` land here
+        let id = wm.strip_suffix(".desktop").unwrap_or(wm);
+        let wm_name = names::session_desktop_name(id).unwrap_or_else(|| id.to_string());
+        // the compositor process gets a row of its own under this name, so the container needs another
+        node.detail = format!("{wm_name} · uwsm");
+        instance = node.detail.clone();
+        (tr("desktop session", "grafikus munkamenet").to_string(), Kind::Session)
     } else if u.name == "init.scope" {
         (
             if is_user {

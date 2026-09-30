@@ -168,9 +168,15 @@ pub fn app_unit_desktop_id(unit: &str) -> Option<String> {
     } else {
         rest
     };
-    // trailing "-<pid>" of transient scopes
+    // trailing "-<pid>" (KDE, GNOME, Flatpak) or "-<random hex>" (uwsm) of transient scopes
     let rest = match rest.rsplit_once('-') {
-        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|c| c.is_ascii_digit()) => head,
+        Some((head, tail))
+            if !tail.is_empty()
+                && (tail.bytes().all(|c| c.is_ascii_digit())
+                    || tail.len() >= 8 && tail.bytes().all(|c| c.is_ascii_hexdigit())) =>
+        {
+            head
+        }
         _ => rest,
     };
     Some(rest.to_string())
@@ -267,6 +273,7 @@ const SESSION_INFRA: &[&str] = &[
     "dbus-broker",
     "ssh-agent",
     "uwsm",
+    "start-hyprland",
 ];
 
 pub fn is_session_infra(p: &Proc) -> bool {
@@ -507,6 +514,18 @@ fn expand_specifiers(desc: &str, unit: &str) -> String {
 
 /// A logind session scope (`session-12.scope`) described from /run/systemd/sessions:
 /// graphical, SSH or console, plus tty / remote host.
+/// Name of a desktop session entry (wayland-sessions / xsessions), e.g. "hyprland" -> "Hyprland".
+pub fn session_desktop_name(id: &str) -> Option<String> {
+    [
+        "/usr/share/wayland-sessions",
+        "/usr/share/xsessions",
+        "/usr/local/share/wayland-sessions",
+    ]
+    .iter()
+    .find_map(|d| fs::read_to_string(format!("{d}/{id}.desktop")).ok())
+    .and_then(|t| parse_desktop(&t).0)
+}
+
 pub fn login_session(unit: &str) -> Option<(String, String, bool)> {
     let id = unit.strip_prefix("session-")?.strip_suffix(".scope")?;
     let text = fs::read_to_string(format!("/run/systemd/sessions/{id}")).ok()?;
@@ -623,6 +642,10 @@ mod tests {
             Some("vivaldi-snapshot-work")
         );
         assert_eq!(app_unit_desktop_id("docker-abc.scope"), None);
+        assert_eq!(
+            app_unit_desktop_id("app-Hyprland-kitty-4c2c3064.scope").as_deref(),
+            Some("Hyprland-kitty")
+        );
     }
 
     #[test]
