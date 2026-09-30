@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=apptop
+GenericName=Resource monitor per program
+GenericName[hu]=Erőforrás-figyelő programonként
+Comment=Memory, swap, CPU and GPU use per program
+Comment[hu]=Memória, swap, CPU és GPU használat programonként
+Icon=utilities-system-monitor
+Exec=apptop
+Terminal=true
+Categories=System;Monitor;ConsoleOnly;
+Keywords=top;htop;memory;process;monitor;

@@ -1,0 +1,52 @@
+# Maintainer: Barta Gábor <emoryy@gmail.com>
+pkgname=apptop-git
+_pkgname=apptop
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Per-application resource monitor for Linux: memory, swap, CPU, GPU and disk use per program"
+arch=('x86_64' 'aarch64')
+url="https://github.com/emoryy/apptop"
+license=('Apache-2.0 OR MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+optdepends=('nvidia-utils: GPU columns on NVIDIA cards'
+            'docker: container names for docker rows')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+  printf "%s.r%s.g%s" "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 target/release/apptop "$pkgdir/usr/bin/apptop"
+  install -Dm644 packaging/apptop.desktop "$pkgdir/usr/share/applications/apptop.desktop"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
